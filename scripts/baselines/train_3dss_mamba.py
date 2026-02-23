@@ -181,83 +181,6 @@ def _cm_scores(cm: np.ndarray) -> Tuple[float, float, float]:
     return oa, aa, kappa
 
 
-def _infer_logits_chunked(
-    model: nn.Module,
-    x_cpu: torch.Tensor,
-    device: torch.device,
-    *,
-    use_amp: bool,
-    infer_chunk_bs: int,
-    phase: str,
-    seed: Optional[int],
-) -> tuple[torch.Tensor, int]:
-    """OOM-safe inference with sticky chunk size.
-
-    Returns:
-        (pred_cpu, stable_chunk_bs)
-        - pred_cpu: predicted labels on CPU (N,)
-        - stable_chunk_bs: chunk size that succeeded for this batch and can be reused
-          on subsequent batches to avoid repeated OOM-fallback overhead.
-    """
-    n = int(x_cpu.shape[0])
-    if n <= 0:
-        return torch.empty((0,), dtype=torch.long), 1
-
-    # 0 means try full batch first; otherwise cap by infer_chunk_bs.
-    cur_bs = n if int(infer_chunk_bs) <= 0 else min(int(infer_chunk_bs), n)
-    pred_chunks: list[torch.Tensor] = []
-    i = 0
-    warned_oom = False
-
-    while i < n:
-        j = min(i + cur_bs, n)
-        xb = None
-        logits = None
-        pred = None
-        try:
-            xb = x_cpu[i:j].to(device, non_blocking=True)
-            with torch.autocast(device_type=device.type, enabled=use_amp):
-                logits = model(xb)
-            # Move only argmax results to CPU (much less transfer than full logits).
-            pred = logits.argmax(dim=1)
-            pred_chunks.append(pred.detach().cpu())
-            i = j
-        except RuntimeError as e:
-            msg = str(e).lower()
-            is_mem_like = (
-                "out of memory" in msg
-                or "cudacachingallocator" in msg
-                or "handles_.at(i)" in msg
-            )
-            if not is_mem_like:
-                raise
-            if device.type == "cuda":
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            if cur_bs <= 1:
-                raise
-            new_bs = max(1, cur_bs // 2)
-            seed_txt = f"[seed {seed}] " if seed is not None else ""
-            print(
-                f"[{_now()}] {seed_txt}[{phase}] mem fallback at chunk={cur_bs}, retry chunk={new_bs}",
-                flush=True,
-            )
-            cur_bs = new_bs
-            warned_oom = True
-        finally:
-            del xb, logits, pred
-
-    if warned_oom and device.type == "cuda":
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-
-    return torch.cat(pred_chunks, dim=0), int(cur_bs)
-
-
 @torch.inference_mode()
 def _evaluate(
     model: nn.Module,
@@ -270,27 +193,29 @@ def _evaluate(
     phase: str = "eval",
     log_every: int = 0,
     seed: Optional[int] = None,
+    max_batches: int = 0,
+    prefer_full_batch: bool = True,
 ) -> Dict[str, float]:
+    """Evaluate with the same style as other baselines: one DataLoader batch -> one forward."""
+    # Kept for config/call-site compatibility; this implementation intentionally ignores
+    # infer_chunk_bs and prefer_full_batch to match other baseline scripts.
+    _ = infer_chunk_bs, prefer_full_batch
+
     model.eval()
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
-    n_batches = len(dl)
+    n_batches_total = len(dl)
+    n_batches = n_batches_total if int(max_batches) <= 0 else min(n_batches_total, int(max_batches))
     t_eval0 = time.time()
 
-    sticky_chunk_bs = int(infer_chunk_bs)
     for bi, (x, _x_spec, y) in enumerate(dl, start=1):
-        # Keep x/y on CPU; move to GPU in smaller chunks inside _infer_logits_chunked.
-        x = x.unsqueeze(1)  # (N,1,B,ps,ps) on CPU
-        pred_cpu, sticky_chunk_bs = _infer_logits_chunked(
-            model,
-            x,
-            device,
-            use_amp=use_amp,
-            infer_chunk_bs=sticky_chunk_bs,
-            phase=phase,
-            seed=seed,
-        )
+        if bi > n_batches:
+            break
+        x = x.unsqueeze(1).to(device, non_blocking=True)
 
-        pred = pred_cpu.numpy()
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            logits = model(x)
+
+        pred = logits.argmax(dim=1).detach().cpu().numpy()
         yt = y.detach().cpu().numpy()
         _cm_update(cm, yt, pred, num_classes)
 
@@ -535,6 +460,9 @@ def main() -> None:
     test_eval_batch_size = int(bcfg.get("test_eval_batch_size", eval_batch_size))
     eval_infer_chunk_bs = int(bcfg.get("eval_infer_chunk_bs", 0))
     test_infer_chunk_bs = int(bcfg.get("test_infer_chunk_bs", eval_infer_chunk_bs))
+    eval_max_batches = int(bcfg.get("eval_max_batches", 0))
+    test_max_batches = int(bcfg.get("test_max_batches", 0))
+    prefer_full_batch_eval = bool(bcfg.get("prefer_full_batch_eval", True))
     num_workers = int(bcfg.get("num_workers", train_cfg.get("num_workers", 0)))
     prefetch_factor = int(bcfg.get("prefetch_factor", 2))
     persistent_workers = bool(bcfg.get("persistent_workers", True))
@@ -621,9 +549,9 @@ def main() -> None:
         f"[{_now()}] [seed {seed}] dataloaders ready: "
         f"train_batches={len(dl_train)} val_batches={len(dl_val)} test_batches={len(dl_test)} "
         f"bs={batch_size} val_bs={val_eval_batch_size} test_bs={test_eval_batch_size} "
-        f"eval_chunk={eval_infer_chunk_bs if eval_infer_chunk_bs>0 else 'FULL'} "
-        f"test_chunk={test_infer_chunk_bs if test_infer_chunk_bs>0 else 'FULL'} "
-        f"workers={num_workers}",
+        f"workers={num_workers} eval_mode=one_batch_one_forward "
+        f"eval_max_batches={eval_max_batches if eval_max_batches>0 else 'FULL'} "
+        f"test_max_batches={test_max_batches if test_max_batches>0 else 'FULL'}",
         flush=True,
     )
 
@@ -784,6 +712,8 @@ def main() -> None:
             phase="val",
             log_every=0,
             seed=seed,
+            max_batches=eval_max_batches,
+            prefer_full_batch=prefer_full_batch_eval,
         )
         score = _select_score(val_out, select_metric)
 
@@ -830,7 +760,8 @@ def main() -> None:
 
     print(
         f"[{_now()}] [seed {seed}] final test eval start: batches={len(dl_test)} "
-        f"test_bs={test_eval_batch_size} test_chunk={test_infer_chunk_bs if test_infer_chunk_bs>0 else 'FULL'}",
+        f"test_bs={test_eval_batch_size} subset_batches={test_max_batches if test_max_batches>0 else 'FULL'} "
+        f"eval_mode=one_batch_one_forward",
         flush=True,
     )
     test_out = _evaluate(
@@ -843,6 +774,8 @@ def main() -> None:
         phase="test",
         log_every=int(bcfg.get("test_log_every", 50)),
         seed=seed,
+        max_batches=test_max_batches,
+        prefer_full_batch=prefer_full_batch_eval,
     )
     print(f"[{_now()}] [seed {seed}] final test eval done", flush=True)
 
@@ -859,6 +792,9 @@ def main() -> None:
             "patch_size": patch_size,
             "spectral_method": spec_method,
             "pca_bands": int(pca_bands),
+            "prefer_full_batch_eval": bool(prefer_full_batch_eval),
+            "eval_max_batches": int(eval_max_batches),
+            "test_max_batches": int(test_max_batches),
             "best_ep": int(best_ep),
             "best_val_score": float(best_score),
             "cfg_fingerprint": {

@@ -123,40 +123,40 @@ baseline:
     pca_bands: 64
     pca_whiten: false
 
-    embed_dim: 72
+    embed_dim: 64
     depth: 3
-    d_state: 32
-    dt_rank: 6
-    dim_inner: 144
+    d_state: 24
+    dt_rank: 4
+    dim_inner: 128
     group_type: "Cube"
     scan_type: "Parallel spectral-spatial"
     k_group: 4
     pos: true
     cls: true
-    conv3D_channel: 72
+    conv3D_channel: 64
     conv3D_kernel: [3, 5, 5]
 
     augment: true
-    batch_size: 8
+    batch_size: 10
     lr: 1.0e-4
-    weight_decay: 2.0e-3
+    weight_decay: 2.5e-3
     betas: [0.9, 0.999]
     grad_clip: 0.8
     label_smoothing: 0.0
 
-    max_epochs: 260
-    min_epochs: 80
-    early_stop_patience: 30
+    max_epochs: 220
+    min_epochs: 60
+    early_stop_patience: 24
     select_metric: kappa
-    min_lr: 5.0e-7
+    min_lr: 1.0e-6
     log_every: 10
 
     num_workers: 8
     prefetch_factor: 2
     persistent_workers: true
-    eval_num_workers: 2
+    eval_num_workers: 4
     test_num_workers: 4
-    persistent_eval_workers: false
+    persistent_eval_workers: true
     val_prefetch_factor: 2
     test_prefetch_factor: 2
 
@@ -164,8 +164,8 @@ baseline:
     speed_tf32: true
     speed_fused_adamw: true
 
-    val_eval_batch_size: 1024
-    test_eval_batch_size: 6144
-    eval_infer_chunk_bs: 128
-    test_infer_chunk_bs: 128
-    test_log_every: 50
+    val_eval_batch_size: 512
+    test_eval_batch_size: 512
+    eval_infer_chunk_bs: 512
+    test_infer_chunk_bs: 512
+    test_log_every: 10
