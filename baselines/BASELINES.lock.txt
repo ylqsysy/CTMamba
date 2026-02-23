@@ -1,0 +1,10 @@
+# baseline repos pinned by commit
+# generated: 2026-02-09T15:46:00+08:00
+spectralformer fd08eb5edc9565f86b925a6b9abf8ebb63a5f065 https://github.com/danfenghong/IEEE_TGRS_SpectralFormer.git
+ssftt 994f5d72e4cf22e92d9b5ab9743e33dfdf642e1d https://github.com/zgr6010/HSI_SSFTT.git
+gsc_vit 2ac8719321e1ef67238e9e8b77f934e604172085 https://github.com/flyzzie/TGRS-GSC-VIT.git
+morphformer 51727267086f9fffd541c59c0b9eda890f315b67 https://github.com/mhaut/morphFormer.git
+mambahsi 5ef62822388f68a148332b77239eaa3bb2f5e758 https://github.com/RockAilab/MambaHSI_Plus.git
+3dss_mamba 49cdf6fd640f259237eb12af555779bae71282cf https://github.com/IIP-Team/3DSS-Mamba.git
+a2s2k 0bba673d6343bd147b0d29a93d3a4d7a9bc522d9 https://github.com/suvojit-0x55aa/A2S2K-ResNet.git
+igroupss_mamba 56b9d33a2908fb93f7d13200cd85b05a32c29c59 https://github.com/IIP-Team/IGroupSS-Mamba.git

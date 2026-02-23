@@ -1,0 +1,10 @@
+
+# external baseline repos (downloaded by script)
+
+# all experiment outputs (checkpoints/logs)
+
+/external/baselines/
+/outputs/
+data/
+*.mat
+*.npy

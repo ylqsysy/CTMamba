@@ -1,0 +1,171 @@
+baseline:
+  svm:
+    kernel: linear
+    C: 0.05
+    gamma: scale
+    pca: 4
+    max_train_per_class: 30
+    class_weight: null
+
+  cnn2d:
+    patch_size: 15
+    pca_bands: 8
+    base_channels: 12
+    dropout: 0.80
+    augment: true
+    batch_size: 64
+    eval_batch_size: 512
+    num_workers: 0
+
+    lr: 0.00082
+    weight_decay: 0.032
+    grad_clip: 1.0
+
+    max_epochs: 170
+    early_stop_patience: 15
+    min_epochs: 55
+    select_metric: kappa
+
+    use_amp: true
+    label_smoothing: 0.14
+    spectral_dropout: 0.30
+    input_noise_std: 0.018
+
+    class_weight: null
+    class_weight_power: 0.0
+
+  cnn3d:
+    patch_size: 15
+    pca_bands: 5
+    dropout: 0.76
+    augment: false
+    batch_size: 32
+    eval_batch_size: 256
+    num_workers: 0
+    lr: 0.00070
+    weight_decay: 0.048
+    grad_clip: 1.0
+    max_epochs: 75
+    early_stop_patience: 12
+    min_epochs: 12
+    select_metric: kappa
+    use_amp: true
+    label_smoothing: 0.14
+    spectral_dropout: 0.44
+    input_noise_std: 0.048
+
+  spectralformer:
+    patch_size: 15
+    near_band: 7
+    mode: CAF
+
+    dim: 64
+    depth: 4
+    heads: 4
+    dim_head: 16
+    mlp_dim: 128
+    dropout: 0.20
+    emb_dropout: 0.10
+
+    batch_size: 16
+    eval_batch_size: 256
+    num_workers: 0
+
+    lr: 3.0e-4
+    weight_decay: 3.0e-3
+    betas: [0.9, 0.999]
+    label_smoothing: 0.06
+    grad_clip: 1.0
+
+    max_epochs: 160
+    early_stop: true
+    early_stop_patience: 30
+    min_epochs: 50
+    select_metric: kappa
+
+    scheduler: cosine
+    min_lr: 1.0e-6
+
+    pad_mode: reflect
+    norm_mean_global_blend: 0.0
+    norm_std_global_ratio: 0.05
+    norm_std_abs_floor: 1.0e-3
+
+    use_amp: true
+
+  ssftt:
+    patch_size: 15
+    spectral_method: pca
+    pca_bands: 30
+
+    batch_size: 16
+    eval_batch_size: 256
+    num_workers: 0
+
+    lr: 0.000185
+    weight_decay: 0.135
+    max_epochs: 170
+    min_epochs: 32
+    early_stop_patience: 18
+    select_metric: kappa
+
+    num_tokens: 1
+    dim: 24
+    depth: 1
+    heads: 2
+    mlp_dim: 48
+    dropout: 0.72
+    emb_dropout: 0.64
+    
+  3dss_mamba:
+    patch_size: 15
+    spectral_method: pca
+    pca_bands: 36
+    pca_whiten: false
+
+    embed_dim: 48
+    depth: 2
+    d_state: 24
+    dt_rank: 4
+    dim_inner: 96
+    group_type: "Cube"
+    scan_type: "Parallel spectral-spatial"
+    k_group: 4
+    pos: true
+    cls: true
+    conv3D_channel: 48
+    conv3D_kernel: [3, 5, 5]
+
+    augment: true
+    batch_size: 12
+    lr: 1.4e-4
+    weight_decay: 4.0e-3
+    betas: [0.9, 0.999]
+    grad_clip: 1.0
+    label_smoothing: 0.02
+
+    max_epochs: 210
+    min_epochs: 60
+    early_stop_patience: 22
+    select_metric: kappa
+    min_lr: 1.0e-6
+    log_every: 10
+
+    num_workers: 8
+    prefetch_factor: 2
+    persistent_workers: true
+    eval_num_workers: 2
+    test_num_workers: 4
+    persistent_eval_workers: false
+    val_prefetch_factor: 2
+    test_prefetch_factor: 2
+
+    speed_cudnn_benchmark: true
+    speed_tf32: true
+    speed_fused_adamw: true
+
+    val_eval_batch_size: 1024
+    test_eval_batch_size: 4096
+    eval_infer_chunk_bs: 128
+    test_infer_chunk_bs: 128
+    test_log_every: 50
