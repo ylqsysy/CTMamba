@@ -41,22 +41,19 @@ def _metrics_from_cm(cm: np.ndarray) -> Dict[str, float]:
     return {"OA": oa, "AA": aa, "Kappa": kappa}
 
 
-_ALPHA_MIN = 1e-6
-_ALPHA_MAX = 1e4
-_EPS = 1e-12
-
-
-def _sanitize_alpha(alpha: torch.Tensor) -> torch.Tensor:
-    a = alpha.float()
-    a = torch.nan_to_num(a, nan=1.0, posinf=_ALPHA_MAX, neginf=1.0)
-    a = torch.clamp(a, min=_ALPHA_MIN, max=_ALPHA_MAX)
-    return a
-
-
-def _alpha_to_prob(alpha: torch.Tensor) -> torch.Tensor:
-    a = _sanitize_alpha(alpha)
-    denom = a.sum(dim=1, keepdim=True).clamp_min(_EPS)
-    return a / denom
+def _extract_logits(out: Any) -> torch.Tensor:
+    if torch.is_tensor(out):
+        return out
+    if isinstance(out, (list, tuple)) and len(out) > 0 and torch.is_tensor(out[0]):
+        return out[0]
+    if isinstance(out, dict):
+        for k in ("logits", "pred", "y", "scores"):
+            if k in out and torch.is_tensor(out[k]):
+                return out[k]
+        vals = [v for v in out.values() if torch.is_tensor(v)]
+        if vals:
+            return vals[0]
+    raise TypeError(f"Unsupported model output type: {type(out)}")
 
 
 @torch.no_grad()
@@ -70,8 +67,8 @@ def _eval_metrics(model: torch.nn.Module, dl: DataLoader, device: torch.device, 
         y = y.to(device, non_blocking=True)
 
         out = model(x, x_spec)
-        prob = _alpha_to_prob(out)
-        pred = torch.argmax(prob, dim=1)
+        logits = _extract_logits(out)
+        pred = torch.argmax(logits, dim=1)
 
         yt = y.detach().cpu().numpy().astype(np.int64, copy=False)
         yp = pred.detach().cpu().numpy().astype(np.int64, copy=False)
@@ -99,7 +96,7 @@ def _make_model(model_cfg: Dict[str, Any], num_classes: int, raw_bands: int) -> 
         "spec_hidden": int(mcfg.get("spec_hidden", mcfg.get("d_model", 96))),
         "moe_experts": int(mcfg.get("moe_experts", 3)),
         "moe_topk": int(mcfg.get("moe_topk", 1)),
-        "head": str(mcfg.get("head", "evidential")),
+        "head": str(mcfg.get("head", "ce")),
     }
     cfg_kwargs = _filter_kwargs_by_signature(VSSM3DConfig, cfg_kwargs)
     cfg = VSSM3DConfig(**cfg_kwargs)
