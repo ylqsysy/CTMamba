@@ -120,52 +120,58 @@ baseline:
   3dss_mamba:
     patch_size: 15
     spectral_method: pca
-    pca_bands: 64
-    pca_whiten: false
-
-    embed_dim: 64
-    depth: 3
-    d_state: 24
+    pca_bands: 15
+    pca_whiten: true
+    embed_dim: 32
+    depth: 2
+    d_state: 16
     dt_rank: 4
-    dim_inner: 128
-    group_type: "Cube"
-    scan_type: "Parallel spectral-spatial"
+    dim_inner: 64
+    group_type: Cube
+    scan_type: Parallel spectral-spatial
     k_group: 4
     pos: true
     cls: true
-    conv3D_channel: 64
-    conv3D_kernel: [3, 5, 5]
-
-    augment: true
-    batch_size: 10
-    lr: 1.0e-4
-    weight_decay: 2.5e-3
+    conv3D_channel: 32
+    conv3D_kernel: [5, 7, 7]
+    augment: false
+    batch_size: 64
+    val_eval_batch_size: 1024
+    test_eval_batch_size: 1024
+    num_workers: 0
+    eval_num_workers: 0
+    test_num_workers: 0
+    prefetch_factor: 2
+    persistent_workers: false
+    persistent_eval_workers: false
+    val_prefetch_factor: 2
+    test_prefetch_factor: 2
+    lr: 0.0005
+    weight_decay: 0.005
     betas: [0.9, 0.999]
-    grad_clip: 0.8
-    label_smoothing: 0.0
-
-    max_epochs: 220
-    min_epochs: 60
-    early_stop_patience: 24
+    grad_clip: 1.0
+    label_smoothing: 0.05
+    max_epochs: 150
+    min_epochs: 40
+    early_stop_patience: 30
+    eval_every: 5
+    eval_on_first: false
     select_metric: kappa
     min_lr: 1.0e-6
     log_every: 10
-
-    num_workers: 8
-    prefetch_factor: 2
-    persistent_workers: true
-    eval_num_workers: 4
-    test_num_workers: 4
-    persistent_eval_workers: true
-    val_prefetch_factor: 2
-    test_prefetch_factor: 2
-
+    steps_per_epoch: 0
+    cache_train_patches: true
+    fast_eval_vectorized: true
+    fast_eval_chunk_bs: 1024
+    prefer_full_batch_eval: false
+    eval_infer_chunk_bs: 128
+    test_infer_chunk_bs: 128
+    test_log_every: 50
     speed_cudnn_benchmark: true
     speed_tf32: true
     speed_fused_adamw: true
-
-    val_eval_batch_size: 512
-    test_eval_batch_size: 512
-    eval_infer_chunk_bs: 512
-    test_infer_chunk_bs: 512
-    test_log_every: 10
+    pin_memory_train: false
+    pin_memory_eval: false
+    speed_torch_compile: false
+    torch_compile_mode: reduce-overhead
+    use_amp: true
