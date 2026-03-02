@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Evaluation script (protocol-safe, NO TTA)."""
+"""Evaluate a trained checkpoint on validation and test splits.
+
+This entry point intentionally performs a single deterministic forward pass
+without any test-time augmentation so that metrics are directly comparable
+across repeated runs.
+"""
 
 from __future__ import annotations
 

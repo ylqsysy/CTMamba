@@ -1,7 +1,7 @@
 # TriScanMamba
 
 TriScanMamba is a research codebase for hyperspectral image (HSI) classification with selective state-space modeling and mixture-of-experts routing.
-The repository is organized for reproducible training/evaluation runs and for direct use in manuscript submission workflows.
+The repository is organized around reproducible training and evaluation workflows that can be reused across datasets.
 
 ## Overview
 
