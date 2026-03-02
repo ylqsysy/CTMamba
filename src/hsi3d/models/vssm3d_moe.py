@@ -14,7 +14,6 @@ from hsi3d.modules.ss2d_like import VSSBlock, Downsample
 from hsi3d.modules.spectral_scan import GroupedBiSpectralScan
 from hsi3d.modules.cross_coupling import FiLMCrossCoupling
 from hsi3d.modules.moe import MoE3
-from hsi3d.modules.evidential import EvidentialHead
 
 
 @dataclass
@@ -46,7 +45,7 @@ class VSSM3DConfig:
     moe_experts: int = 0
     moe_topk: int = 1
 
-    # head: "ce" or "evidential"
+    # classification head
     head: str = "ce"
 
 
@@ -82,13 +81,11 @@ class VSSM3DMoE(nn.Module):
 
         self.ln_head = nn.LayerNorm(s2)
 
-        head = str(getattr(cfg, "head", "evidential")).strip().lower()
-        if head in ("ce", "softmax", "logits"):
-            self.head = nn.Linear(s2, self.num_classes)
-            self.head_type = "ce"
-        else:
-            self.head = EvidentialHead(s2, self.num_classes)
-            self.head_type = "evidential"
+        head = str(getattr(cfg, "head", "ce")).strip().lower()
+        if head not in ("ce", "softmax", "logits"):
+            raise ValueError(f"Unsupported head='{head}'. This repository currently supports CE/logits head only.")
+        self.head = nn.Linear(s2, self.num_classes)
+        self.head_type = "ce"
 
 
     def _pool_tokens(self, tok: torch.Tensor, H: int, W: int) -> torch.Tensor:

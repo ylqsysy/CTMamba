@@ -199,7 +199,6 @@ def _forward_logits(
                 raise
             out = model(x, x_spec2)
 
-    unc = None
     if torch.is_tensor(out):
         return out, None
     if isinstance(out, (list, tuple)):
@@ -219,11 +218,7 @@ def _forward_logits(
             if not tvals:
                 raise ValueError("Model output dict has no tensors.")
             logits = tvals[0]
-        for k in ("uncertainty", "uncert", "u"):
-            if k in out and torch.is_tensor(out[k]):
-                unc = out[k].detach()
-                break
-        return logits, unc
+        return logits, None
     raise ValueError(f"Unsupported model output type: {type(out)}")
 
 
@@ -387,7 +382,6 @@ def evaluate(
 ) -> Dict[str, Any]:
     model.eval()
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
-    unc_list = []
 
     it_max = int(steps) if steps and int(steps) > 0 else None
 
@@ -402,17 +396,10 @@ def evaluate(
                 x_spec = x_spec.to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                logits, unc = _forward_logits(model, x, x_spec, patch_size=patch_size)
+                logits, _ = _forward_logits(model, x, x_spec, patch_size=patch_size)
 
             pred = torch.argmax(logits, dim=1)
             _confusion_matrix_update(cm, y.detach().cpu().numpy(), pred.detach().cpu().numpy(), num_classes)
 
-            if unc is not None and torch.is_tensor(unc):
-                unc_list.append(unc.detach().float().cpu().numpy().reshape(-1))
-
     out = _metrics_from_cm(cm)
-    if unc_list:
-        u = np.concatenate(unc_list, axis=0)
-        out["uncertainty_mean"] = float(u.mean())
-        out["uncertainty_std"] = float(u.std())
     return out

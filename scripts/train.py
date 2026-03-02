@@ -273,8 +273,6 @@ def main() -> None:
 
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 1))
 
-    evi_coeff = float(train_cfg.get("evi_coeff", 1.0))
-    evi_anneal_epochs = int(train_cfg.get("evi_anneal_epochs", 130))
     label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
     conf_penalty = float(train_cfg.get("conf_penalty", 0.0))
     mixup_alpha = float(train_cfg.get("mixup_alpha", 0.0))
@@ -309,7 +307,6 @@ def main() -> None:
             device=device,
             amp=use_amp, scaler=scaler, grad_clip=grad_clip,
             steps_per_epoch=steps_per_epoch, grad_accum_steps=grad_accum_steps,
-            evi_coeff=evi_coeff, evi_anneal_epochs=evi_anneal_epochs,
             label_smoothing=label_smoothing, conf_penalty=conf_penalty,
             mixup_alpha=mixup_alpha, mixup_prob=mixup_prob,
             focal_gamma=focal_gamma,

@@ -36,8 +36,6 @@ focal_gamma: 1.0
 mixup_alpha: 0.4
 mixup_prob: 0.20
 
-evi_coeff: 0.0
-evi_anneal_epochs: 0
 
 backbone_lr_mult: 0.6
 head_lr_mult: 1.2
@@ -47,5 +45,3 @@ ckpt_avg_k: 10
 ckpt_avg_interval: 2
 ckpt_avg_start_epoch: 60
 ckpt_avg_end_epoch: 0
-
-pretrained_spectral: ""

@@ -1,118 +1,123 @@
-# HSI-3D VSSM + MoE + MIM (Option-1) + Evidential Uncertainty
+# TriScanMamba
 
-This repository implements a **JSTARS-oriented** hyperspectral image classification pipeline:
+TriScanMamba is a research codebase for hyperspectral image (HSI) classification with selective state-space modeling and mixture-of-experts routing.
+The repository is organized for reproducible training/evaluation runs and for direct use in manuscript submission workflows.
 
-- **Backbone**: hierarchical **VSSM-style 2D selective scanning (SS2D-like)** blocks (multi-direction mixing) in a stage-wise CNN-like hierarchy
-- **Key innovation**: **Factorized 3D selective scanning (F-SS3D)**:
-  - Spatial: multi-direction SS2D-like mixing
-  - Spectral: bidirectional **grouped spectral scanning**
-  - Cross-coupling: lightweight **FiLM / low-rank modulation** between spatial and spectral states
-- **MoE**: 3-expert mixture in late stages (space-heavy / spec-heavy / coupled)
-- **Uncertainty**: evidential (Dirichlet) classifier head produces calibrated confidence / uncertainty maps
-- **Protocol**: **RANDOM only**, **10 runs (seed 0..9)**, **10% train / 10% val / 80% test**, report mean±std of OA/AA/Kappa
-- **Self-supervised pretrain (Option-1)**: masked band modeling (**MBM**) for spectral encoder (fast & 8GB-friendly)
+## Overview
 
-> Designed for **RTX 4060 Laptop (8GB VRAM)**: patch-based training, AMP, conservative defaults.
+The main implementation combines:
 
----
+- a VSSM-style 3D backbone for spatial–spectral representation learning,
+- MoE routing in deeper stages,
+- fixed random-split evaluation over multiple seeds.
 
-## 0) Put your raw data
+In addition to the main model, the project includes baseline training scripts and utilities for dataset preprocessing and split generation.
 
-Copy your `.mat` files into:
+## Repository Structure
 
+```text
+configs/
+  baselines/          # baseline-specific runtime settings
+  datasets/           # dataset paths, keys, class metadata
+  model/              # model hyperparameters
+  train/              # optimizer/scheduler/training settings
+scripts/
+  prepare_raw_to_processed.py
+  make_splits.py
+  train.py
+  eval.py
+  run_10runs_and_mean.py
+  baselines/          # baseline training entry points
+src/hsi3d/            # package source code
+splits/random/        # predefined random splits
+tests/                # minimal import test
 ```
-data/raw/indian_pines/*.mat
-data/raw/pavia_university/*.mat
-data/raw/houston2018/*.mat
-data/raw/whu_hi_longkou/*.mat
-```
 
-Expected filenames (default):
-- Indian Pines: `Indian_pines_corrected.mat`, `Indian_pines_gt.mat`
-- PaviaU: `PaviaU.mat`, `PaviaU_gt.mat`
-- Houston2018: `Houston18.mat`, `Houston18_7gt.mat`
-- WHU-Hi-LongKou: `WHU_Hi_LongKou.mat`, `WHU_Hi_LongKou_gt.mat`
+## Environment Setup
 
-If your keys/filenames differ, edit `configs/datasets/*.yaml`.
-
----
-
-## 1) Install
+### Option A: Conda
 
 ```bash
+conda env create -f environment.yml
+conda activate triscanmamba
+```
+
+### Option B: pip
+
+```bash
+pip install -r requirements_freeze.txt
 pip install -e .
 ```
 
----
+## Data Preparation
 
-## 2) Raw -> Processed (once per dataset)
-
-Example (Indian Pines):
+Place raw `.mat` files under the dataset-specific `raw_dir` defined in `configs/datasets/*.yaml`.
+Then convert raw files into the internal NumPy format:
 
 ```bash
 python scripts/prepare_raw_to_processed.py \
-  --dataset_cfg configs/datasets/indian_pines.yaml \
+  --dataset_cfg configs/datasets/pavia_university.yaml \
   --data_root data
 ```
 
-This writes:
-- `data/processed/<dataset>/raw/cube.npy`  (H,W,B float32)
-- `data/processed/<dataset>/raw/gt.npy`    (H,W int64)
+## Split Generation
 
----
-
-## 3) Create RANDOM splits (10 runs)
+Create random splits for repeated experiments (example: seeds 0-9):
 
 ```bash
 python scripts/make_splits.py \
-  --dataset_cfg configs/datasets/indian_pines.yaml \
+  --dataset_cfg configs/datasets/pavia_university.yaml \
   --split_tag random \
   --seeds 0-9 \
-  --train_ratio 0.10 --val_ratio 0.10 \
+  --train_ratio 0.10 \
+  --val_ratio 0.10 \
   --data_root data \
   --out_dir splits
 ```
 
-Outputs:
-- `splits/random/indian_pines_seed0.json` ... `seed9.json`
+## Training and Evaluation
 
----
-
-## 4) (Optional) Self-supervised pretrain (Option-1: MBM)
-
-This pretrains the **spectral encoder** only and saves `pretrain.pt`.
+### Single run
 
 ```bash
-python -u scripts/pretrain_mim.py \
-  --dataset_cfg configs/datasets/indian_pines.yaml \
-  --model_cfg configs/model/vssm3d_ip.yaml \
-  --pretrain_cfg configs/pretrain/mbm.yaml \
-  --data_root data \
+python scripts/train.py \
+  --dataset_cfg configs/datasets/pavia_university.yaml \
+  --model_cfg configs/model/vssm3d_pu.yaml \
+  --train_cfg configs/train/pu.yaml \
+  --split_json splits/random/pavia_university_seed0.json \
+  --out_dir outputs/checkpoints/pavia_university_seed0 \
   --seed 0 \
-  --out_dir outputs/pretrain/ip_mbm_seed0 \
+  --data_root data \
   --amp
 ```
 
----
+```bash
+python scripts/eval.py \
+  --dataset_cfg configs/datasets/pavia_university.yaml \
+  --model_cfg configs/model/vssm3d_pu.yaml \
+  --checkpoint outputs/checkpoints/pavia_university_seed0/checkpoints/best.pt \
+  --split_json splits/random/pavia_university_seed0.json \
+  --out_dir outputs/checkpoints/pavia_university_seed0 \
+  --data_root data
+```
 
-## 5) Train + Eval (10 runs) and report mean±std
+### 10-run protocol
 
 ```bash
 python -u scripts/run_10runs_and_mean.py \
-  --dataset indian_pines \
+  --dataset pavia_university \
   --split_tag random \
-  --amp --num_workers 0 \
+  --amp \
+  --num_workers 0 \
   --out_base outputs/checkpoints
 ```
 
-Outputs:
-- per seed: `outputs/checkpoints/indian_pines_seed{0..9}/eval.json`
-- summary: `outputs/checkpoints/indian_pines_mean10/mean_metrics.json`, `summary.csv`, `summary.md`
+## Reproducibility Notes
 
----
+- Use fixed split files from `splits/random/` when comparing methods.
+- Report mean and standard deviation over the same seed set.
+- Record software versions together with experiment outputs.
 
-## Notes
+## License
 
-- This code is **reviewer-safe** by default: no test-time augmentation.
-- Uncertainty metrics are saved in `eval_detail.json` (entropy, evidential uncertainty, confidence histogram).
-
+This project is released under the MIT License. See `LICENSE` for details.

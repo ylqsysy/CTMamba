@@ -1,10 +1,24 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
 
-# external baseline repos (downloaded by script)
+# Virtual environments
+.venv/
+venv/
 
-# all experiment outputs (checkpoints/logs)
-
-/external/baselines/
-/outputs/
+# Experiment assets
+outputs/
 data/
+external/baselines/
+
+# Large intermediate / cache files
 *.mat
 *.npy
+
+# Local environment snapshots / build logs
+conda_list.txt
+build_mamba_ssm.log

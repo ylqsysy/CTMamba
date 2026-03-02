@@ -135,12 +135,6 @@ def main() -> None:
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--eval_batch_size", type=int, default=512)
     ap.add_argument("--python", default=sys.executable)
-    ap.add_argument("--pretrained_spectral", default="")
-    ap.add_argument(
-        "--pretrained_spectral_tpl",
-        default="",
-        help="template for per-seed SSL ckpt path; supports {seed} and {dataset}",
-    )
     args = ap.parse_args()
 
     dataset = str(args.dataset)
@@ -197,15 +191,6 @@ def main() -> None:
             if args.amp:
                 cmd_train.append("--amp")
 
-            ckpt_tpl = (str(args.pretrained_spectral_tpl).strip() or str(args.pretrained_spectral).strip())
-            if ckpt_tpl:
-                if ("{seed}" in ckpt_tpl) or ("{dataset}" in ckpt_tpl):
-                    ckpt_path = ckpt_tpl.format(seed=seed, dataset=dataset)
-                else:
-                    ckpt_path = ckpt_tpl
-                if ckpt_path and not Path(ckpt_path).exists():
-                    raise SystemExit(f"[ERROR] pretrained ckpt not found: {ckpt_path}")
-                cmd_train += ["--pretrained_spectral", ckpt_path]
 
             _run(cmd_train)
         else:
@@ -265,7 +250,6 @@ def main() -> None:
             "dataset": dataset,
             "split_tag": args.split_tag,
             "protocol": "RANDOM only; 10 seeds; STRICT split_json indices; no TTA; mean±std reported",
-            "pretrained_spectral": (str(args.pretrained_spectral_tpl).strip() or str(args.pretrained_spectral).strip()) or "",
         },
     }
     _write_json(mean_dir / "mean_metrics.json", out)
