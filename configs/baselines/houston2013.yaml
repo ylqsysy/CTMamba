@@ -142,19 +142,18 @@ baseline:
     eval_num_workers: 0
     test_num_workers: 0
     prefetch_factor: 2
-    persistent_workers: false
     persistent_eval_workers: false
     val_prefetch_factor: 2
     test_prefetch_factor: 2
-    lr: 0.0005
-    weight_decay: 0.01
+    lr: 0.00045
+    weight_decay: 0.006
     betas: [0.9, 0.999]
     grad_clip: 1.0
-    label_smoothing: 0.01
-    max_epochs: 150
-    min_epochs: 40
+    label_smoothing: 0.05
+    max_epochs: 170
+    min_epochs: 55
     early_stop_patience: 30
-    eval_every: 5
+    eval_every: 2
     eval_on_first: false
     select_metric: kappa
     min_lr: 1.0e-6

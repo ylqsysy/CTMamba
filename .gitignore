@@ -1,8 +1,12 @@
+# IDEs and Editors
+.vscode/
+
 # Python artifacts
 __pycache__/
 *.py[cod]
 *.so
 *.egg-info/
+hsi3d.egg-info/
 .eggs/
 .pytest_cache/
 
@@ -18,7 +22,3 @@ external/baselines/
 # Large intermediate / cache files
 *.mat
 *.npy
-
-# Local environment snapshots / build logs
-conda_list.txt
-build_mamba_ssm.log

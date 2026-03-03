@@ -208,31 +208,20 @@ baseline:
     persistent_eval_workers: false
     val_prefetch_factor: 2
     test_prefetch_factor: 2
-    lr: 0.0005
-    weight_decay: 0.01
+    lr: 0.00048
+    weight_decay: 0.011
     betas: [0.9, 0.999]
     grad_clip: 1.0
-    label_smoothing: 0.01
-    max_epochs: 150
-    min_epochs: 40
+    label_smoothing: 0.015
+    max_epochs: 160
+    min_epochs: 45
     early_stop_patience: 30
-    eval_every: 5
+    eval_every: 2
     eval_on_first: false
     select_metric: kappa
     min_lr: 1.0e-6
     log_every: 10
     steps_per_epoch: 0
-    cache_train_patches: true
-    fast_eval_vectorized: true
-    fast_eval_chunk_bs: 1024
-    prefer_full_batch_eval: false
-    eval_infer_chunk_bs: 128
-    test_infer_chunk_bs: 128
-    test_log_every: 50
-    speed_cudnn_benchmark: true
-    speed_tf32: true
-    speed_fused_adamw: true
-    pin_memory_train: false
     pin_memory_eval: false
     speed_torch_compile: false
     torch_compile_mode: reduce-overhead
