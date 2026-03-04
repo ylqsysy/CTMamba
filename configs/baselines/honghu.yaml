@@ -117,6 +117,31 @@ baseline:
     dropout: 0.62
     emb_dropout: 0.55
 
+  a2s2k:
+    patch_size: 15
+    pca_bands: 14
+    kernel_channels: 14
+    reduction: 4
+    dropout: 0.40
+    augment: false
+    batch_size: 32
+    eval_batch_size: 256
+    num_workers: 0
+    lr: 0.000385
+    weight_decay: 0.038
+    betas: [0.9, 0.999]
+    grad_clip: 1.0
+    max_epochs: 88
+    min_epochs: 18
+    early_stop_patience: 11
+    select_metric: kappa
+    label_smoothing: 0.08
+    spectral_dropout: 0.16
+    input_noise_std: 0.024
+    class_weight: balanced
+    class_weight_power: 0.40
+    use_amp: true
+
   3dss_mamba:
     patch_size: 15
     spectral_method: pca

@@ -7,6 +7,7 @@ Supports baselines:
 - svm
 - 2dcnn
 - 3dcnn
+- a2s2k
 - spectralformer
 - ssftt
 - 3dss_mamba
@@ -165,7 +166,7 @@ def main() -> None:
     ap.add_argument(
         "--baseline",
         required=True,
-        choices=["svm", "2dcnn", "3dcnn", "spectralformer", "ssftt", "3dss_mamba"],
+        choices=["svm", "2dcnn", "3dcnn", "a2s2k", "spectralformer", "ssftt", "3dss_mamba"],
     )
     ap.add_argument("--split_tag", default="random")
     ap.add_argument("--seeds", default="0-9")
@@ -239,6 +240,20 @@ def main() -> None:
                 "--out_dir", str(out_dir),
                 "--seed", str(seed),
                 "--baseline", args.baseline,
+                "--patch_size", str(yaml_patch_size),
+            ]
+            if args.use_amp:
+                cmd.append("--use_amp")
+        elif args.baseline == "a2s2k":
+            train_script = repo_root / "scripts" / "baselines" / "train_a2s2k.py"
+            cmd = [
+                args.python, "-u", str(train_script),
+                "--dataset_cfg", str(dataset_cfg),
+                "--train_cfg", str(train_cfg),
+                "--split_json", str(split_json),
+                "--out_dir", str(out_dir),
+                "--seed", str(seed),
+                "--baseline", "a2s2k",
                 "--patch_size", str(yaml_patch_size),
             ]
             if args.use_amp:
