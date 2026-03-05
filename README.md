@@ -1,72 +1,144 @@
 # TriScanMamba
 
-TriScanMamba is a research codebase for hyperspectral image (HSI) classification with selective state-space modeling and mixture-of-experts routing.
-The repository is organized around reproducible training and evaluation workflows that can be reused across datasets.
+TriScanMamba is a hyperspectral image (HSI) classification code release centered on a selective state-space 3D backbone with optional mixture-of-experts (MoE) routing.  
+The repository is intentionally scoped to method implementation and experiment protocol logic.
 
-## Overview
+## Scope of This Public Release
 
-The main implementation combines:
+Included:
 
-- a VSSM-style 3D backbone for spatial–spectral representation learning,
-- MoE routing in deeper stages,
-- fixed random-split evaluation over multiple seeds.
+- core model implementation (`VSSM3DMoE`) and modules under `src/hsi3d/`
+- training and evaluation entry points
+- data conversion (`.mat -> .npy`) and split generation utilities
 
-In addition to the main model, the project includes baseline training scripts and utilities for dataset preprocessing and split generation.
+Not included:
 
-## Repository Structure
+- dataset assets (`data/`, raw or processed)
+- dataset/model/train configuration files
+- pre-generated split files
+- baseline third-party repositories and baseline wrapper scripts
+- checkpoints, logs, and output artifacts
+
+## Repository Layout
 
 ```text
-configs/
-  baselines/          # baseline-specific runtime settings
-  datasets/           # dataset paths, keys, class metadata
-  model/              # model hyperparameters
-  train/              # optimizer/scheduler/training settings
+LICENSE
+README.md
 scripts/
   prepare_raw_to_processed.py
   make_splits.py
   train.py
   eval.py
   run_10runs_and_mean.py
-  baselines/          # baseline training entry points
-src/hsi3d/            # package source code
-splits/random/        # predefined random splits
-tests/                # minimal import test
+src/hsi3d/
+  data/
+  metrics/
+  models/
+  modules/
+  training/
+  utils/
 ```
 
-## Environment Setup
+## Environment
 
-### Option A: Conda
+Python 3.10+ is recommended.
+
+Install dependencies manually:
 
 ```bash
-conda env create -f environment.yml
-conda activate triscanmamba
+pip install numpy scipy pyyaml torch h5py scikit-learn tqdm joblib
 ```
 
-### Option B: pip
+Since this repository is not packaged as an installable wheel, expose `src/` via `PYTHONPATH`:
 
 ```bash
-pip install -r requirements_freeze.txt
-pip install -e .
+export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
 ```
 
-## Data Preparation
+## Data Contract
 
-Place raw `.mat` files under the dataset-specific `raw_dir` defined in `configs/datasets/*.yaml`.
-Then convert raw files into the internal NumPy format:
+Training and evaluation read processed arrays from:
+
+- `data/processed/<dataset>/raw/cube.npy` with shape `(H, W, B)`, dtype `float32`
+- `data/processed/<dataset>/raw/gt.npy` with shape `(H, W)`, dtype integer labels
+
+`scripts/prepare_raw_to_processed.py` converts dataset `.mat` files into this format.
+
+## Minimal Configuration Contracts
+
+The repository does not ship dataset-specific config files.  
+Create your own YAML/JSON files and pass their paths via CLI arguments.
+
+### `dataset_cfg` (minimal example)
+
+```yaml
+dataset: pavia_university
+label_offset: 1
+num_classes: 9
+raw_dir: /path/to/raw/pavia_university
+cube_file: PaviaU.mat
+gt_file: PaviaU_gt.mat
+cube_key: paviaU
+gt_key: paviaU_gt
+```
+
+### `model_cfg` (minimal example)
+
+```yaml
+patch_size: 15
+dropout: 0.15
+stages: [2, 2, 4]
+stage_dims: [64, 96, 128]
+spec_groups: 8
+spec_layers: 3
+spec_hidden: 96
+moe_experts: 3
+moe_topk: 1
+head: ce
+```
+
+### `train_cfg` (minimal example)
+
+```yaml
+epochs: 200
+batch_size: 16
+eval_batch_size: 512
+lr: 1.1e-4
+weight_decay: 3.0e-2
+augment: false
+```
+
+### `split_json` (required keys)
+
+```json
+{
+  "dataset": "pavia_university",
+  "seed": 0,
+  "label_offset": 1,
+  "num_classes": 9,
+  "train_indices": [0, 1, 2],
+  "val_indices": [3, 4],
+  "test_indices": [5, 6, 7]
+}
+```
+
+Indices are flat indices over the `H*W` raster order.
+
+## Workflow
+
+1. Convert raw `.mat` files:
 
 ```bash
 python scripts/prepare_raw_to_processed.py \
-  --dataset_cfg configs/datasets/pavia_university.yaml \
+  --dataset_cfg path/to/dataset.yaml \
   --data_root data
 ```
 
-## Split Generation
-
-Create random splits for repeated experiments (example: seeds 0-9):
+2. Generate split files:
 
 ```bash
 python scripts/make_splits.py \
-  --dataset_cfg configs/datasets/pavia_university.yaml \
+  --dataset_cfg path/to/dataset.yaml \
   --split_tag random \
   --seeds 0-9 \
   --train_ratio 0.10 \
@@ -75,15 +147,13 @@ python scripts/make_splits.py \
   --out_dir splits
 ```
 
-## Training and Evaluation
-
-### Single run
+3. Train:
 
 ```bash
 python scripts/train.py \
-  --dataset_cfg configs/datasets/pavia_university.yaml \
-  --model_cfg configs/model/vssm3d_pu.yaml \
-  --train_cfg configs/train/pu.yaml \
+  --dataset_cfg path/to/dataset.yaml \
+  --model_cfg path/to/model.yaml \
+  --train_cfg path/to/train.yaml \
   --split_json splits/random/pavia_university_seed0.json \
   --out_dir outputs/checkpoints/pavia_university_seed0 \
   --seed 0 \
@@ -91,33 +161,33 @@ python scripts/train.py \
   --amp
 ```
 
+4. Evaluate:
+
 ```bash
-python scripts/eval.py \
-  --dataset_cfg configs/datasets/pavia_university.yaml \
-  --model_cfg configs/model/vssm3d_pu.yaml \
-  --checkpoint outputs/checkpoints/pavia_university_seed0/checkpoints/best.pt \
+PYTHONPATH=src python scripts/eval.py \
+  --dataset_cfg path/to/dataset.yaml \
+  --model_cfg path/to/model.yaml \
   --split_json splits/random/pavia_university_seed0.json \
-  --out_dir outputs/checkpoints/pavia_university_seed0 \
-  --data_root data
+  --data_root data \
+  --seed 0 \
+  --ckpt outputs/checkpoints/pavia_university_seed0/checkpoints/best.pt \
+  --ckpt_key model \
+  --batch_size 512 \
+  --out outputs/checkpoints/pavia_university_seed0/eval.json
 ```
 
-### 10-run protocol
+`scripts/run_10runs_and_mean.py` is provided for repeated-seed aggregation and expects a user-prepared `configs/` and `splits/` layout.
 
-```bash
-python -u scripts/run_10runs_and_mean.py \
-  --dataset pavia_university \
-  --split_tag random \
-  --amp \
-  --num_workers 0 \
-  --out_base outputs/checkpoints
-```
+## Reproducibility Protocol
 
-## Reproducibility Notes
+For comparative reporting (including OA/AA/Kappa tables), the following protocol is recommended:
 
-- Use fixed split files from `splits/random/` when comparing methods.
-- Report mean and standard deviation over the same seed set.
-- Record software versions together with experiment outputs.
+- use fixed train/val/test index files across all compared methods
+- compute normalization statistics from training pixels only
+- disable test-time augmentation at evaluation
+- use identical seeds and report mean ± standard deviation across runs
+- archive the exact config and split files used for final reported numbers
 
 ## License
 
-This project is released under the MIT License. See `LICENSE` for details.
+MIT License. See `LICENSE`.
