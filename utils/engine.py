@@ -93,8 +93,6 @@ def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[tor
             return x[:, patch_size // 2, patch_size // 2, :]
 
     hdim, wdim = _find_patch_spatial_dims(x, patch_size)
-    sd = _find_spectral_dim(x, patch_size)
-
     h = int(x.shape[hdim])
     w = int(x.shape[wdim])
     ch, cw = h // 2, w // 2
@@ -242,8 +240,6 @@ def train_one_epoch(
     patch_size: int = 15,
     grad_accum_steps: int = 1,
     steps_per_epoch: int = 0,
-    epoch: int = 0,
-    **kwargs,
 ) -> float:
     model.train()
     if scaler is None:
@@ -275,9 +271,6 @@ def train_one_epoch(
         x = _apply_spec_dropout(x, float(spec_dropout_p), float(spec_dropout_ratio), patch_size=patch_size)
         if x_spec is None:
             x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)
-        else:
-            # keep spec in sync if dropout was applied on x
-            x_spec = x_spec
 
         do_mix = (mixup_prob > 0.0) and (mixup_alpha > 0.0) and (torch.rand((), device=device).item() < mixup_prob)
         if do_mix:
@@ -378,7 +371,6 @@ def evaluate(
     use_amp: bool = False,
     patch_size: int = 15,
     steps: int = 0,
-    **kwargs,
 ) -> Dict[str, Any]:
     model.eval()
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)

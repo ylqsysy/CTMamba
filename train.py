@@ -218,9 +218,6 @@ def main() -> None:
         spec_dropout_p=float(train_cfg.get("spec_dropout_p", 0.0)),
         spec_dropout_ratio=float(train_cfg.get("spec_dropout_ratio", 0.0)),
         noise_std=float(train_cfg.get("noise_std", 0.0)),
-        spec_jitter_std=float(train_cfg.get("spec_jitter_std", 0.0)),
-        spec_shift_p=float(train_cfg.get("spec_shift_p", 0.0)),
-        spec_shift_max=int(train_cfg.get("spec_shift_max", 0)),
     )
     ds_eval_kwargs = dict(
         cube=cube, gt=gt, patch_size=patch_size, mean=mean, std=std, label_offset=label_offset, augment=False,
@@ -277,10 +274,6 @@ def main() -> None:
     mixup_prob = float(train_cfg.get("mixup_prob", 0.0))
 
     focal_gamma = float(train_cfg.get("focal_gamma", 0.0))
-    spec_cutout_prob = float(train_cfg.get("spec_cutout_prob", 0.0))
-    spec_cutout_ratio = float(train_cfg.get("spec_cutout_ratio", 0.0))
-    spatial_cutout_prob = float(train_cfg.get("spatial_cutout_prob", 0.0))
-    spatial_cutout_ratio = float(train_cfg.get("spatial_cutout_ratio", 0.0))
     aug_noise_std = float(train_cfg.get("aug_noise_std", 0.0))
 
     early_stop = bool(train_cfg.get("early_stop", True))
@@ -297,21 +290,20 @@ def main() -> None:
 
     t0 = time.time()
     for ep in range(max_epochs):
-        # Provide multiple aliases for loader/optimizer to match any engine signature
         train_kwargs = dict(
             model=model,
-            dl=dl_tr, loader=dl_tr, train_loader=dl_tr, data_loader=dl_tr,
-            optimizer=optimizer, opt=optimizer,
+            dl=dl_tr,
+            optimizer=optimizer,
             device=device,
-            amp=use_amp, scaler=scaler, grad_clip=grad_clip,
+            use_amp=use_amp, scaler=scaler, grad_clip=grad_clip,
             steps_per_epoch=steps_per_epoch, grad_accum_steps=grad_accum_steps,
             label_smoothing=label_smoothing, conf_penalty=conf_penalty,
             mixup_alpha=mixup_alpha, mixup_prob=mixup_prob,
             focal_gamma=focal_gamma,
-            spec_cutout_prob=spec_cutout_prob, spec_cutout_ratio=spec_cutout_ratio,
-            spatial_cutout_prob=spatial_cutout_prob, spatial_cutout_ratio=spatial_cutout_ratio,
             aug_noise_std=aug_noise_std,
-            epoch=ep,  # will be ignored if unsupported
+            patch_size=patch_size,
+            spec_dropout_p=float(train_cfg.get("spec_dropout_p", 0.0)),
+            spec_dropout_ratio=float(train_cfg.get("spec_dropout_ratio", 0.0)),
         )
         loss_out = train_one_epoch(**_filter_kwargs(train_one_epoch, train_kwargs))
         loss = _unwrap_scalar(loss_out)
@@ -321,10 +313,11 @@ def main() -> None:
 
         eval_kwargs = dict(
             model=model,
-            dl=dl_va, loader=dl_va, val_loader=dl_va, data_loader=dl_va,
+            dl=dl_va,
             device=device,
             num_classes=num_classes,
-            amp=use_amp,
+            use_amp=use_amp,
+            patch_size=patch_size,
         )
         val_out = evaluate(**_filter_kwargs(evaluate, eval_kwargs))
 
@@ -382,8 +375,8 @@ def main() -> None:
     model.to(device)
     model.eval()
 
-    val_best = evaluate(**_filter_kwargs(evaluate, dict(model=model, dl=dl_va, loader=dl_va, device=device, num_classes=num_classes, amp=False)))
-    te_best = evaluate(**_filter_kwargs(evaluate, dict(model=model, dl=dl_te, loader=dl_te, device=device, num_classes=num_classes, amp=False)))
+    val_best = evaluate(**_filter_kwargs(evaluate, dict(model=model, dl=dl_va, device=device, num_classes=num_classes, use_amp=False, patch_size=patch_size)))
+    te_best = evaluate(**_filter_kwargs(evaluate, dict(model=model, dl=dl_te, device=device, num_classes=num_classes, use_amp=False, patch_size=patch_size)))
 
     result = {
         "best_ep": int(best_ep),
