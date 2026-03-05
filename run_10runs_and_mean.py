@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Any
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 def _run(cmd: List[str]) -> None:
@@ -178,7 +178,7 @@ def main() -> None:
         if not ckpt_best.exists():
             cmd_train = [
                 str(args.python),
-                "scripts/train.py",
+                "train.py",
                 "--dataset_cfg", str(dataset_cfg),
                 "--model_cfg", str(model_cfg),
                 "--train_cfg", str(train_cfg),
@@ -203,7 +203,7 @@ def main() -> None:
         else:
             cmd_eval = [
                 str(args.python),
-                "scripts/eval.py",
+                "eval.py",
                 "--dataset_cfg", str(dataset_cfg),
                 "--model_cfg", str(model_cfg),
                 "--split_json", str(split_json),

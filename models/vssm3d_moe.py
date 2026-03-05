@@ -10,10 +10,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hsi3d.modules.ss2d_like import VSSBlock, Downsample
-from hsi3d.modules.spectral_scan import GroupedBiSpectralScan
-from hsi3d.modules.cross_coupling import FiLMCrossCoupling
-from hsi3d.modules.moe import MoE3
+from models.ss2d_like import VSSBlock, Downsample
+from models.spectral_scan import GroupedBiSpectralScan
+from models.cross_coupling import FiLMCrossCoupling
+from models.moe import MoE3
 
 
 @dataclass

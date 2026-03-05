@@ -17,10 +17,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
+import sys
 
 import numpy as np
 
-from hsi3d.utils.io import load_yaml, ensure_dir
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from utils.io import load_yaml, ensure_dir
 
 
 def _is_numeric_ndarray(x: Any) -> bool:

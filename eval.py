@@ -13,15 +13,19 @@ import argparse
 import inspect
 from pathlib import Path
 from typing import Dict, Any
+import sys
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from hsi3d.utils.io import load_yaml, load_json, ensure_dir, save_json
-from hsi3d.utils.seed import set_global_seed
-from hsi3d.data.hsi_dataset import HSIPatchDataset, compute_train_norm
-from hsi3d.models import VSSM3DConfig, VSSM3DMoE
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from utils.io import load_yaml, load_json, ensure_dir, save_json
+from utils.seed import set_global_seed
+from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
+from models import VSSM3DConfig, VSSM3DMoE
 
 
 def _metrics_from_cm(cm: np.ndarray) -> Dict[str, float]:

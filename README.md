@@ -1,75 +1,54 @@
 # TriScanMamba
 
-TriScanMamba is a hyperspectral image (HSI) classification code release centered on a selective state-space 3D backbone with optional mixture-of-experts (MoE) routing.  
-The repository is intentionally scoped to method implementation and experiment protocol logic.
+TriScanMamba is a compact research codebase for hyperspectral image (HSI) classification, built around a selective state-space 3D backbone with optional mixture-of-experts routing.
+The repository is intentionally focused on method implementation, deterministic protocol control, and reproducible reporting.
 
-## Scope of This Public Release
-
-Included:
-
-- core model implementation (`VSSM3DMoE`) and modules under `src/hsi3d/`
-- training and evaluation entry points
-- data conversion (`.mat -> .npy`) and split generation utilities
-
-Not included:
-
-- dataset assets (`data/`, raw or processed)
-- dataset/model/train configuration files
-- pre-generated split files
-- baseline third-party repositories and baseline wrapper scripts
-- checkpoints, logs, and output artifacts
-
-## Repository Layout
+## What This Repository Contains
 
 ```text
 LICENSE
 README.md
-scripts/
-  prepare_raw_to_processed.py
-  make_splits.py
-  train.py
-  eval.py
-  run_10runs_and_mean.py
-src/hsi3d/
-  data/
-  metrics/
-  models/
-  modules/
-  training/
-  utils/
+train.py
+eval.py
+prepare_raw_to_processed.py
+make_splits.py
+run_10runs_and_mean.py
+models/
+utils/
 ```
+
+- `models/`: network definitions (`VSSM3DMoE` and core blocks).
+- `utils/`: dataset loader, training engine, scheduler, metrics, I/O helpers, seed control.
+- `prepare_raw_to_processed.py`: converts raw `.mat` data to standard `.npy` tensors.
+- `make_splits.py`: generates seed-controlled train/val/test index files.
+- `train.py`: single-run training.
+- `eval.py`: checkpoint evaluation on val/test.
+- `run_10runs_and_mean.py`: repeated-seed aggregation pipeline.
 
 ## Environment
 
 Python 3.10+ is recommended.
 
-Install dependencies manually:
+Install dependencies:
 
 ```bash
 pip install numpy scipy pyyaml torch h5py scikit-learn tqdm joblib
 ```
 
-Since this repository is not packaged as an installable wheel, expose `src/` via `PYTHONPATH`:
+## Data Interface
 
-```bash
-export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
-```
+All training and evaluation scripts expect processed arrays at:
 
-## Data Contract
+- `data/processed/<dataset>/raw/cube.npy` with shape `(H, W, B)` and dtype `float32`
+- `data/processed/<dataset>/raw/gt.npy` with shape `(H, W)` and integer labels
 
-Training and evaluation read processed arrays from:
+Use `prepare_raw_to_processed.py` to convert raw MATLAB files into this layout.
 
-- `data/processed/<dataset>/raw/cube.npy` with shape `(H, W, B)`, dtype `float32`
-- `data/processed/<dataset>/raw/gt.npy` with shape `(H, W)`, dtype integer labels
+## Minimal Config Contracts
 
-`scripts/prepare_raw_to_processed.py` converts dataset `.mat` files into this format.
+This repository does not ship dataset-specific config files. Provide your own YAML/JSON files at runtime.
 
-## Minimal Configuration Contracts
-
-The repository does not ship dataset-specific config files.  
-Create your own YAML/JSON files and pass their paths via CLI arguments.
-
-### `dataset_cfg` (minimal example)
+### 1) `dataset_cfg` (YAML)
 
 ```yaml
 dataset: pavia_university
@@ -82,7 +61,7 @@ cube_key: paviaU
 gt_key: paviaU_gt
 ```
 
-### `model_cfg` (minimal example)
+### 2) `model_cfg` (YAML)
 
 ```yaml
 patch_size: 15
@@ -97,18 +76,19 @@ moe_topk: 1
 head: ce
 ```
 
-### `train_cfg` (minimal example)
+### 3) `train_cfg` (YAML)
 
 ```yaml
-epochs: 200
 batch_size: 16
 eval_batch_size: 512
 lr: 1.1e-4
 weight_decay: 3.0e-2
+max_epochs: 340
+warmup_epochs: 12
 augment: false
 ```
 
-### `split_json` (required keys)
+### 4) `split_json` (JSON)
 
 ```json
 {
@@ -122,22 +102,22 @@ augment: false
 }
 ```
 
-Indices are flat indices over the `H*W` raster order.
+Indices are flat raster indices over `H*W`.
 
 ## Workflow
 
-1. Convert raw `.mat` files:
+### Step 1: Convert raw data
 
 ```bash
-python scripts/prepare_raw_to_processed.py \
+python prepare_raw_to_processed.py \
   --dataset_cfg path/to/dataset.yaml \
   --data_root data
 ```
 
-2. Generate split files:
+### Step 2: Generate splits
 
 ```bash
-python scripts/make_splits.py \
+python make_splits.py \
   --dataset_cfg path/to/dataset.yaml \
   --split_tag random \
   --seeds 0-9 \
@@ -147,10 +127,10 @@ python scripts/make_splits.py \
   --out_dir splits
 ```
 
-3. Train:
+### Step 3: Train
 
 ```bash
-python scripts/train.py \
+python train.py \
   --dataset_cfg path/to/dataset.yaml \
   --model_cfg path/to/model.yaml \
   --train_cfg path/to/train.yaml \
@@ -158,36 +138,35 @@ python scripts/train.py \
   --out_dir outputs/checkpoints/pavia_university_seed0 \
   --seed 0 \
   --data_root data \
+  --num_workers 0 \
   --amp
 ```
 
-4. Evaluate:
+### Step 4: Evaluate
 
 ```bash
-PYTHONPATH=src python scripts/eval.py \
+python eval.py \
   --dataset_cfg path/to/dataset.yaml \
   --model_cfg path/to/model.yaml \
   --split_json splits/random/pavia_university_seed0.json \
-  --data_root data \
-  --seed 0 \
   --ckpt outputs/checkpoints/pavia_university_seed0/checkpoints/best.pt \
   --ckpt_key model \
-  --batch_size 512 \
-  --out outputs/checkpoints/pavia_university_seed0/eval.json
+  --out outputs/checkpoints/pavia_university_seed0/eval.json \
+  --seed 0 \
+  --data_root data \
+  --batch_size 512
 ```
 
-`scripts/run_10runs_and_mean.py` is provided for repeated-seed aggregation and expects a user-prepared `configs/` and `splits/` layout.
+## Evaluation Protocol Recommendation
 
-## Reproducibility Protocol
+For fair comparison and reviewer-facing reproducibility:
 
-For comparative reporting (including OA/AA/Kappa tables), the following protocol is recommended:
-
-- use fixed train/val/test index files across all compared methods
+- keep train/val/test split indices fixed across methods
 - compute normalization statistics from training pixels only
-- disable test-time augmentation at evaluation
-- use identical seeds and report mean ± standard deviation across runs
-- archive the exact config and split files used for final reported numbers
+- evaluate without test-time augmentation
+- report OA, AA, and Kappa
+- report mean ± standard deviation across identical seed sets
 
 ## License
 
-MIT License. See `LICENSE`.
+This project is released under the MIT License. See `LICENSE`.

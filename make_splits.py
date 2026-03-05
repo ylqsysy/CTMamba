@@ -6,10 +6,14 @@ import argparse
 import csv
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
+import sys
 
 import numpy as np
 
-from hsi3d.utils.io import load_yaml, ensure_dir, save_json
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from utils.io import load_yaml, ensure_dir, save_json
 
 # Optional deps for .mat reading (Houston OUC fixed split)
 try:
@@ -805,7 +809,7 @@ def main():
     proc = Path(args.data_root) / "processed" / name / "raw"
     gt_p = proc / "gt.npy"
     if not gt_p.exists():
-        raise SystemExit(f"[ERROR] processed gt not found: {gt_p}. Run scripts/prepare_raw_to_processed.py first.")
+        raise SystemExit(f"[ERROR] processed gt not found: {gt_p}. Run prepare_raw_to_processed.py first.")
     gt = np.load(gt_p).astype(np.int64)
     if gt.ndim != 2:
         raise SystemExit(f"[ERROR] processed gt.npy must be 2D (H,W). got {gt.shape}")

@@ -14,19 +14,17 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-# Ensure "src" is importable
+# Ensure repository root is importable
 import sys as _sys
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_SRC = _REPO_ROOT / "src"
-if _SRC.exists():
-    _sys.path.insert(0, str(_SRC))
+_REPO_ROOT = Path(__file__).resolve().parent
+_sys.path.insert(0, str(_REPO_ROOT))
 
 import yaml  # PyYAML
 
-from hsi3d.data.hsi_dataset import HSIPatchDataset, compute_train_norm
-from hsi3d.training.lr_schedulers import WarmupCosine
-from hsi3d.training.engine import train_one_epoch, evaluate
-from hsi3d.models.vssm3d_moe import VSSM3DConfig, VSSM3DMoE
+from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
+from utils.lr_schedulers import WarmupCosine
+from utils.engine import train_one_epoch, evaluate
+from models.vssm3d_moe import VSSM3DConfig, VSSM3DMoE
 
 
 def _load_yaml(p: Path) -> Dict[str, Any]:
