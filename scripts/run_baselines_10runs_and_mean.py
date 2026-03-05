@@ -11,6 +11,10 @@ Supports baselines:
 - spectralformer
 - ssftt
 - 3dss_mamba
+- gsc_vit
+- morphformer
+- mambahsi
+- igroupss_mamba
 
 Robust to metrics.json schema differences:
 - accepts {"VAL": {...}, "TEST": {...}} or {"val": {...}, "test": {...}}.
@@ -166,7 +170,19 @@ def main() -> None:
     ap.add_argument(
         "--baseline",
         required=True,
-        choices=["svm", "2dcnn", "3dcnn", "a2s2k", "spectralformer", "ssftt", "3dss_mamba"],
+        choices=[
+            "svm",
+            "2dcnn",
+            "3dcnn",
+            "a2s2k",
+            "spectralformer",
+            "ssftt",
+            "3dss_mamba",
+            "gsc_vit",
+            "morphformer",
+            "mambahsi",
+            "igroupss_mamba",
+        ],
     )
     ap.add_argument("--split_tag", default="random")
     ap.add_argument("--seeds", default="0-9")
@@ -296,6 +312,62 @@ def main() -> None:
                 "--out_dir", str(out_dir),
                 "--seed", str(seed),
                 "--baseline", "3dss_mamba",
+                "--patch_size", str(yaml_patch_size),
+            ]
+            if args.use_amp:
+                cmd.append("--use_amp")
+        elif args.baseline == "gsc_vit":
+            train_script = repo_root / "scripts" / "baselines" / "train_gsc_vit.py"
+            cmd = [
+                args.python, "-u", str(train_script),
+                "--dataset_cfg", str(dataset_cfg),
+                "--train_cfg", str(train_cfg),
+                "--split_json", str(split_json),
+                "--out_dir", str(out_dir),
+                "--seed", str(seed),
+                "--baseline", "gsc_vit",
+                "--patch_size", str(yaml_patch_size),
+            ]
+            if args.use_amp:
+                cmd.append("--use_amp")
+        elif args.baseline == "morphformer":
+            train_script = repo_root / "scripts" / "baselines" / "train_morphformer.py"
+            cmd = [
+                args.python, "-u", str(train_script),
+                "--dataset_cfg", str(dataset_cfg),
+                "--train_cfg", str(train_cfg),
+                "--split_json", str(split_json),
+                "--out_dir", str(out_dir),
+                "--seed", str(seed),
+                "--baseline", "morphformer",
+                "--patch_size", str(yaml_patch_size),
+            ]
+            if args.use_amp:
+                cmd.append("--use_amp")
+        elif args.baseline == "mambahsi":
+            train_script = repo_root / "scripts" / "baselines" / "train_mambahsi.py"
+            cmd = [
+                args.python, "-u", str(train_script),
+                "--dataset_cfg", str(dataset_cfg),
+                "--train_cfg", str(train_cfg),
+                "--split_json", str(split_json),
+                "--out_dir", str(out_dir),
+                "--seed", str(seed),
+                "--baseline", "mambahsi",
+                "--patch_size", str(yaml_patch_size),
+            ]
+            if args.use_amp:
+                cmd.append("--use_amp")
+        elif args.baseline == "igroupss_mamba":
+            train_script = repo_root / "scripts" / "baselines" / "train_igroupss_mamba.py"
+            cmd = [
+                args.python, "-u", str(train_script),
+                "--dataset_cfg", str(dataset_cfg),
+                "--train_cfg", str(train_cfg),
+                "--split_json", str(split_json),
+                "--out_dir", str(out_dir),
+                "--seed", str(seed),
+                "--baseline", "igroupss_mamba",
                 "--patch_size", str(yaml_patch_size),
             ]
             if args.use_amp:

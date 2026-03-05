@@ -200,3 +200,112 @@ baseline:
     speed_torch_compile: false
     torch_compile_mode: reduce-overhead
     use_amp: true
+
+  gsc_vit:
+    patch_size: 15
+    pca_bands: 8
+    dims: [256, 128, 64, 32]
+    depth: [1, 1, 1]
+    heads: [1, 1, 1]
+    group_spatial_size: [5, 5, 5]
+    padding: [1, 1, 1]
+    num_groups: [16, 16, 16]
+    dropout: 0.55
+    batch_size: 64
+    lr: 0.001
+    max_epochs: 11
+    min_epochs: 5
+    early_stop_patience: 10
+    scheduler: cosine
+    use_amp: false
+
+  morphformer:
+    patch_size: 15
+    pca_bands: 12
+    pca_whiten: false
+    embed_dim: 64
+    depth: 3
+    num_heads: 4
+    mlp_ratio: 1.75
+    dropout: 0.35
+    batch_size: 64
+    eval_batch_size: 512
+    num_workers: 0
+    lr: 0.00085
+    weight_decay: 0.06
+    betas: [0.9, 0.999]
+    grad_clip: 1.0
+    max_epochs: 60
+    min_epochs: 12
+    early_stop_patience: 10
+    scheduler: cosine
+    min_lr: 1.0e-6
+    select_metric: kappa
+    augment: true
+    label_smoothing: 0.18
+    spectral_dropout: 0.24
+    input_noise_std: 0.030
+    class_weight: balanced
+    class_weight_power: 0.30
+    use_amp: true
+
+  mambahsi:
+    patch_size: 15
+    pca_bands: 16
+    pca_whiten: false
+    embed_dim: 96
+    depth: 4
+    state_kernel: 5
+    mlp_ratio: 2.0
+    dropout: 0.20
+    batch_size: 64
+    eval_batch_size: 512
+    num_workers: 0
+    lr: 0.00055
+    weight_decay: 0.035
+    betas: [0.9, 0.999]
+    grad_clip: 1.0
+    max_epochs: 95
+    min_epochs: 20
+    early_stop_patience: 12
+    scheduler: cosine
+    min_lr: 1.0e-6
+    select_metric: kappa
+    augment: true
+    label_smoothing: 0.12
+    spectral_dropout: 0.14
+    input_noise_std: 0.020
+    class_weight: balanced
+    class_weight_power: 0.45
+    use_amp: true
+
+  igroupss_mamba:
+    patch_size: 15
+    pca_bands: 18
+    pca_whiten: false
+    embed_dim: 112
+    depth: 5
+    state_kernel: 5
+    num_groups: 16
+    mlp_ratio: 2.0
+    dropout: 0.16
+    batch_size: 64
+    eval_batch_size: 512
+    num_workers: 0
+    lr: 0.00048
+    weight_decay: 0.030
+    betas: [0.9, 0.999]
+    grad_clip: 1.0
+    max_epochs: 110
+    min_epochs: 25
+    early_stop_patience: 14
+    scheduler: cosine
+    min_lr: 1.0e-6
+    select_metric: kappa
+    augment: true
+    label_smoothing: 0.10
+    spectral_dropout: 0.12
+    input_noise_std: 0.018
+    class_weight: balanced
+    class_weight_power: 0.55
+    use_amp: true
