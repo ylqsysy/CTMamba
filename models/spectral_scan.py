@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
+"""Spectral selective scan blocks used by TriScanMamba."""
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,48 +13,46 @@ def _best_group_divisor(channels: int, groups: int) -> int:
     c = int(channels)
     if c % g == 0:
         return g
-    # find a divisor <= groups
     for gg in range(min(g, c), 0, -1):
         if c % gg == 0:
             return gg
     return 1
 
 
-class _SpectralConvBlock(nn.Module):
-    def __init__(self, d_model: int, groups: int, dropout: float, kernel_size: int, dilation: int):
+class _GroupedSpectralSSMBlock(nn.Module):
+    def __init__(self, d_model: int, groups: int, dropout: float, kernel_size: int, expand: int):
         super().__init__()
         self.d_model = int(d_model)
-        g = _best_group_divisor(self.d_model, int(groups))
+        g_in = _best_group_divisor(self.d_model, int(groups))
+        hidden = int(max(1, expand) * self.d_model)
+        g_hid = _best_group_divisor(hidden, int(groups))
 
-        k = int(kernel_size)
-        d = int(dilation)
-        pad = (k // 2) * d
+        k = int(max(1, kernel_size))
+        pad = k // 2
 
         self.ln = nn.LayerNorm(self.d_model)
-        self.dw = nn.Conv1d(self.d_model, self.d_model, kernel_size=k, padding=pad, dilation=d, groups=self.d_model, bias=False)
-        self.pw1 = nn.Conv1d(self.d_model, self.d_model * 2, kernel_size=1, groups=g, bias=True)
-        self.pw2 = nn.Conv1d(self.d_model * 2, self.d_model, kernel_size=1, groups=g, bias=True)
+        self.in_proj = nn.Conv1d(self.d_model, hidden * 2, kernel_size=1, groups=g_in, bias=True)
+        self.dw = nn.Conv1d(hidden, hidden, kernel_size=k, padding=pad, groups=hidden, bias=False)
+        self.mix = nn.Conv1d(hidden, hidden, kernel_size=1, groups=g_hid, bias=True)
+        self.out_proj = nn.Conv1d(hidden, self.d_model, kernel_size=1, bias=True)
         self.drop = nn.Dropout(float(dropout))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, C)
-        y = self.ln(x)
-        y = y.transpose(1, 2)                 # (B, C, L)
-        y = self.dw(y)
-        y = self.pw2(F.gelu(self.pw1(y)))
-        y = y.transpose(1, 2)                 # (B, L, C)
+        y = self.ln(x).transpose(1, 2)
+        t = self.in_proj(y)
+        u, gate = t.chunk(2, dim=1)
+        u = F.silu(u)
+        u_fw = self.dw(u)
+        u_bw = torch.flip(self.dw(torch.flip(u, dims=[-1])), dims=[-1])
+        u = 0.5 * (u_fw + u_bw)
+        u = self.mix(u)
+        y = self.out_proj(u * torch.sigmoid(gate)).transpose(1, 2).contiguous()
         y = self.drop(y)
         return x + y
 
 
 class GroupedBiSpectralScan(nn.Module):
-    """Band-axis mixer that actually mixes along the spectral dimension.
-
-    Input:
-      x: (B, bands) or (B, bands, d_model)
-    Output:
-      y: (B, bands, d_model)
-    """
+    """Grouped bidirectional spectral scan."""
 
     def __init__(
         self,
@@ -65,7 +62,8 @@ class GroupedBiSpectralScan(nn.Module):
         groups: int = 8,
         dropout: float = 0.0,
         kernel_size: int = 7,
-        dilation_cycle: tuple[int, ...] = (1, 2, 4, 1),
+        expand: int = 2,
+        dilation_cycle: tuple[int, ...] = (1,),
         **kwargs,
     ):
         if "d_in" in kwargs:
@@ -83,24 +81,23 @@ class GroupedBiSpectralScan(nn.Module):
         self.pos = nn.Parameter(torch.zeros(self.bands, self.d_model))
         nn.init.trunc_normal_(self.pos, std=0.02)
 
-        dil = tuple(int(x) for x in (dilation_cycle if len(dilation_cycle) > 0 else (1,)))
-        blocks = []
-        for i in range(self.num_layers):
-            blocks.append(
-                _SpectralConvBlock(
+        self.blocks = nn.ModuleList(
+            [
+                _GroupedSpectralSSMBlock(
                     d_model=self.d_model,
                     groups=self.groups,
                     dropout=float(dropout),
                     kernel_size=int(kernel_size),
-                    dilation=int(dil[i % len(dil)]),
+                    expand=int(expand),
                 )
-            )
-        self.blocks = nn.ModuleList(blocks)
+                for _ in range(self.num_layers)
+            ]
+        )
         self.out_ln = nn.LayerNorm(self.d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
-            x = x.unsqueeze(-1)  # (B, bands, 1)
+            x = x.unsqueeze(-1)
             x = self.in_proj(x)
         elif x.dim() == 3:
             if x.shape[-1] != self.d_model:

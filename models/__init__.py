@@ -1,3 +1,3 @@
-from .vssm3d_moe import VSSM3DConfig, VSSM3DMoE
+from .triscan_mamba import TriScanMamba, TriScanMambaConfig, VSSM3DConfig, VSSM3DModel
 
-__all__ = ["VSSM3DConfig", "VSSM3DMoE"]
+__all__ = ["TriScanMambaConfig", "TriScanMamba", "VSSM3DConfig", "VSSM3DModel"]

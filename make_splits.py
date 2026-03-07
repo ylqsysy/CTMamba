@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
@@ -15,14 +14,13 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from utils.io import load_yaml, ensure_dir, save_json
 
-# Optional deps for .mat reading (Houston OUC fixed split)
 try:
-    import h5py  # MATLAB v7.3 (HDF5)
+    import h5py
 except Exception:
     h5py = None
 
 try:
-    from scipy.io import loadmat  # MATLAB <= v7.2
+    from scipy.io import loadmat
 except Exception:
     loadmat = None
 
@@ -31,7 +29,6 @@ def _parse_seeds(s: str) -> List[int]:
     s = str(s).strip()
     if not s:
         return [0]
-    # formats: "0-9" or "0,1,2" or "0"
     if "-" in s and "," not in s:
         a, b = s.split("-", 1)
         a, b = int(a), int(b)
@@ -43,7 +40,7 @@ def _parse_seeds(s: str) -> List[int]:
 
 def _base_keeps(nc: int) -> Tuple[int, int, int]:
     """
-    Stability floors (reviewer-safe) to avoid AA instability on tiny classes.
+    Per-class minimum keep counts for small/imbalanced classes.
     Piecewise floors:
       nc >= 20: (10,5,5)
       nc >= 12: (5,3,3)
@@ -97,7 +94,6 @@ def _fit_keeps(
     def _sum() -> int:
         return int(kt + kv + ktest)
 
-    # Phase A: reduce down to lower bounds
     excess = _sum() - nc
     if excess > 0:
         for key in relax_order:
@@ -119,7 +115,6 @@ def _fit_keeps(
                 ktest -= dec
                 excess -= dec
 
-    # Phase B: if still infeasible, allow going below lower bounds
     excess = _sum() - nc
     if excess > 0:
         for key in relax_order:
@@ -154,7 +149,6 @@ def _load_mat_any(path: str) -> Dict[str, np.ndarray]:
     """
     p = str(path)
 
-    # Try HDF5 first (MATLAB v7.3)
     if h5py is not None:
         try:
             out: Dict[str, np.ndarray] = {}
@@ -169,7 +163,6 @@ def _load_mat_any(path: str) -> Dict[str, np.ndarray]:
         except Exception:
             pass
 
-    # Fallback: scipy loadmat
     if loadmat is None:
         raise RuntimeError("Cannot load .mat: neither h5py (v7.3) nor scipy.io.loadmat is available.")
     m = loadmat(p)
@@ -224,12 +217,10 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
     """
     a = np.asarray(arr).squeeze()
 
-    # mask/label image
     if a.ndim == 2 and a.shape == (H, W):
         idx = np.flatnonzero(a.reshape(-1) > 0)
         return idx.astype(np.int64)
 
-    # row/col pairs
     if a.ndim == 2 and (a.shape[0] == 2 or a.shape[1] == 2):
         rc = a if a.shape[0] == 2 else a.T
         r = np.asarray(rc[0]).reshape(-1)
@@ -242,12 +233,9 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
         if r.size > 0:
             rmin, rmax = int(r.min()), int(r.max())
             cmin, cmax = int(c.min()), int(c.max())
-            # common MATLAB export: 1-based indices
             one_based = (rmin >= 1 and cmin >= 1 and rmax <= H and cmax <= W)
-            # some datasets (notably Houston2018 DFC) provide indices in a 2x grid (e.g., 0.5m GT vs 1m HSI)
             one_based_2x = (not one_based) and (rmin >= 1 and cmin >= 1 and rmax <= 2 * H and cmax <= 2 * W)
         else:
-            # empty -> treat as one-based so we don't produce negatives
             one_based = True
             one_based_2x = False
 
@@ -258,8 +246,6 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
                 rmin, rmax = int(r.min()), int(r.max())
                 cmin, cmax = int(c.min()), int(c.max())
 
-        # If indices exceed the target grid but fit a 2x grid, downsample by 2.
-        # This makes 0.5m (2H x 2W) coordinate lists usable with 1m (H x W) images/GT.
         if r.size > 0:
             fits_2x_zero_based = (rmax >= H or cmax >= W) and (rmax <= 2 * H - 1) and (cmax <= 2 * W - 1)
             if fits_2x_zero_based:
@@ -276,7 +262,6 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
         idx = idx[(idx >= 0) & (idx < H * W)]
         return np.unique(idx).astype(np.int64)
 
-    # linear index list
     a = a.reshape(-1)
     a = a[np.isfinite(a)]
     if a.size == 0:
@@ -286,7 +271,6 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
     N = H * W
     amin, amax = int(a.min()), int(a.max())
 
-    # 1-based if within [1, N]
     if amin >= 1 and amax <= N:
         a = a - 1
 
@@ -316,9 +300,6 @@ def _make_fixed_index_split(
     """
     rng = np.random.default_rng(int(seed))
     N = int(gt_flat.size)
-    # infer H,W from flat length by caller? we don't have; only need N and class positions
-    # But index conversion needs H,W; here we can't. So caller provides linear indices already? No.
-    # => We'll load index_mat and detect H,W by requiring gt comes from 2D originally in main.
     raise RuntimeError("Internal error: _make_fixed_index_split must be called with H,W-aware wrapper.")
 
 
@@ -339,8 +320,8 @@ def _make_stratified_split(
       train_indices, val_indices, test_indices (flat indices into H*W)
 
     Two modes:
-      (A) ratio mode: use train_ratio/val_ratio and then enforce strict global targets
-      (B) per-class mode: use fixed per_class_train/per_class_val for each class; NO strict global target adjust
+      (A) ratio mode: use train_ratio/val_ratio, then match global split counts
+      (B) per-class mode: use fixed per_class_train/per_class_val for each class
 
     Per-class minima (min_*_per_class) are enforced as "keeps" when feasible; relaxed only for tiny classes.
     """
@@ -352,7 +333,6 @@ def _make_stratified_split(
         if int(per_class_train) < 0 or int(per_class_val) < 0:
             raise SystemExit("[ERROR] per-class mode requires BOTH --per_class_train and --per_class_val (>=0).")
 
-    # per-class pools
     per_class_all: Dict[int, np.ndarray] = {}
     for c in classes:
         idx_c = np.where(gt_flat == c)[0].astype(np.int64)
@@ -366,10 +346,8 @@ def _make_stratified_split(
     keep_va_map: Dict[int, int] = {}
     keep_te_map: Dict[int, int] = {}
 
-    # For stats target
     tgt_tr = tgt_va = tgt_te = 0
     if fixed_mode:
-        # compute "intended target" as sum(min(fixed, nc))
         for c in classes:
             nc = int(per_class_all[c].size)
             if nc <= 0:
@@ -381,7 +359,6 @@ def _make_stratified_split(
             tgt_va += va_t
             tgt_te += te_t
     else:
-        # strict global targets in ratio mode
         tgt_tr = int(round(N * float(train_ratio)))
         tgt_va = int(round(N * float(val_ratio)))
         tgt_tr = max(0, min(tgt_tr, N))
@@ -396,18 +373,15 @@ def _make_stratified_split(
             keep_tr_map[c] = keep_va_map[c] = keep_te_map[c] = 0
             continue
 
-        # stability floors
         base_tr, base_va, base_te = _base_keeps(nc)
 
         req_tr = max(0, int(min_train_per_class))
         req_va = max(0, int(min_val_per_class))
         req_te = max(0, int(min_test_per_class))
 
-        # For "keeps": in fixed_mode, also consider fixed targets as desired sizes (but they can be relaxed if nc too small)
         if fixed_mode:
             desired_tr = max(base_tr, req_tr, int(per_class_train))
             desired_va = max(base_va, req_va, int(per_class_val))
-            # test desired at least req/base
             desired_te = max(base_te, req_te)
         else:
             desired_tr = max(base_tr, req_tr)
@@ -429,52 +403,41 @@ def _make_stratified_split(
         per_class_policy[c] = "relaxed_min_due_to_small_class" if relaxed else "min_ok"
 
         if fixed_mode:
-            # fixed per-class targets
             ntr = min(int(per_class_train), nc)
             nva = min(int(per_class_val), max(0, nc - ntr))
 
-            # enforce keeps
             ntr = max(ntr, keep_tr)
             nva = max(nva, keep_va)
 
-            # ensure room for test keep
             if ntr + nva > nc - keep_te:
                 overflow = (ntr + nva) - (nc - keep_te)
-                # shrink val first
                 dec_va = min(overflow, max(0, nva - keep_va))
                 nva -= dec_va
                 overflow -= dec_va
                 if overflow > 0:
                     ntr = max(keep_tr, ntr - overflow)
 
-            # final feasibility fallback
             te_x = nc - ntr - nva
             if te_x < keep_te or ntr < keep_tr or nva < keep_va:
-                # honor keeps then allocate remaining sequentially
                 ntr = min(nc, keep_tr)
                 nva = min(nc - ntr, keep_va)
                 per_class_policy[c] = "forced_fallback_extreme"
 
         else:
-            # ratio allocation
             ntr = int(round(nc * float(train_ratio)))
             nva = int(round(nc * float(val_ratio)))
 
-            # apply protected minima
             ntr = max(ntr, keep_tr)
             nva = max(nva, keep_va)
 
-            # ensure room for test keep
             if ntr + nva > nc - keep_te:
                 overflow = (ntr + nva) - (nc - keep_te)
-                # shrink val first but keep keep_va
                 dec_va = min(overflow, max(0, nva - keep_va))
                 nva -= dec_va
                 overflow -= dec_va
                 if overflow > 0:
                     ntr = max(keep_tr, ntr - overflow)
 
-            # last resort
             te_x = nc - ntr - nva
             if te_x < keep_te or ntr < keep_tr or nva < keep_va:
                 ntr = min(nc, keep_tr)
@@ -555,7 +518,6 @@ def _make_stratified_split(
         src = np.array(src_list, dtype=np.int64) if src_list else np.zeros((0,), dtype=np.int64)
         return src, dst, moved_total
 
-    # In ratio mode, adjust to strict global sizes (respect per-class keep)
     if not fixed_mode:
         if tr.size > tgt_tr:
             excess = int(tr.size - tgt_tr)
@@ -599,7 +561,6 @@ def _make_stratified_split(
                 te = te[(need - moved):]
                 va = np.concatenate([va, moved2], axis=0)
 
-    # ensure disjoint
     tr_set, va_set, te_set = set(tr.tolist()), set(va.tolist()), set(te.tolist())
     assert tr_set.isdisjoint(va_set) and tr_set.isdisjoint(te_set) and va_set.isdisjoint(te_set), "split overlap detected"
 
@@ -675,7 +636,6 @@ def _make_houston_fixed_from_index(
     tr_idx = np.unique(_to_linear_indices(tr_raw, H, W))
     te_idx = np.unique(_to_linear_indices(te_raw, H, W))
 
-    # remove overlap (prefer test)
     tr_set = set(tr_idx.tolist())
     te_set = set(te_idx.tolist())
     overlap = tr_set & te_set
@@ -684,13 +644,11 @@ def _make_houston_fixed_from_index(
     tr_idx = np.array(sorted(tr_set), dtype=np.int64)
     te_idx = np.array(sorted(te_set), dtype=np.int64)
 
-    # Masks for fixed train/test
     mask_tr = np.zeros(N, dtype=bool)
     mask_te = np.zeros(N, dtype=bool)
     mask_tr[tr_idx] = True
     mask_te[te_idx] = True
 
-    # Sample val from TRAIN only
     rng = np.random.default_rng(int(seed))
     mask_val = np.zeros(N, dtype=bool)
 
@@ -708,7 +666,6 @@ def _make_houston_fixed_from_index(
             take = int(round(pos.size * float(val_ratio)))
             take = max(take, min_va)
 
-        # keep at least keep_tr in train after taking val (when feasible)
         max_take = max(0, int(pos.size - keep_tr))
         take = min(take, max_take)
         if take <= 0:
@@ -727,7 +684,6 @@ def _make_houston_fixed_from_index(
     rng.shuffle(va)
     rng.shuffle(te)
 
-    # Per-class stats
     pc_stats = {}
     for c in classes:
         c = int(c)
@@ -783,11 +739,9 @@ def main():
     ap.add_argument("--min_val_per_class", type=int, default=1)
     ap.add_argument("--min_test_per_class", type=int, default=1)
 
-    # fixed per-class protocol (PU / Houston2018 random stratified)
     ap.add_argument("--per_class_train", type=int, default=-1, help=">=0 enables per-class fixed protocol (train per class). Requires --per_class_val too.")
     ap.add_argument("--per_class_val", type=int, default=-1, help=">=0 enables per-class fixed protocol (val per class). Requires --per_class_train too.")
 
-    # NEW: Houston OUC fixed train/test from index.mat
     ap.add_argument("--fixed_index", action="store_true",
                     help="Use fixed train/test from a dataset-provided index .mat (e.g., Houston OUC houston_index.mat).")
     ap.add_argument("--fixed_index_mat", default="",
@@ -824,7 +778,6 @@ def main():
 
     perclass_rows: List[Dict[str, Any]] = []
 
-    # auto fixed_index_mat if needed
     fixed_index_mat = str(args.fixed_index_mat).strip()
     if args.fixed_index and not fixed_index_mat:
         cand = Path(args.data_root) / "raw" / name / "houston_index.mat"

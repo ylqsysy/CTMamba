@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ def _as_x_xspec_y(batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], tor
             vals = [v for v in batch.values() if torch.is_tensor(v)]
             if len(vals) < 2:
                 raise ValueError("Batch dict must contain x/y or at least two tensors.")
-            # heuristic: y is integer tensor
             y = next((v for v in vals if v.dtype in (torch.int64, torch.int32, torch.int16, torch.uint8)), None)
             if y is None:
                 x, y = vals[0], vals[1]
@@ -41,7 +39,6 @@ def _as_x_xspec_y(batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], tor
         x_spec = None
         y = None
 
-        # common patterns
         if len(batch) >= 3:
             b1, b2 = batch[1], batch[2]
             if torch.is_tensor(b1) and b1.dtype in (torch.int64, torch.int32, torch.int16, torch.uint8):
@@ -85,7 +82,6 @@ def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[tor
     if x.ndim < 3:
         return None
 
-    # Fast-path: (B,C,H,W) or (B,H,W,C)
     if x.ndim == 4:
         if int(x.shape[2]) == patch_size and int(x.shape[3]) == patch_size:
             return x[:, :, patch_size // 2, patch_size // 2]
@@ -102,13 +98,9 @@ def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[tor
     slc[wdim] = cw
     xc = x[tuple(slc)]
 
-    # xc should be (B, bands) in most cases; otherwise, try to squeeze/reshape.
     if xc.ndim == 2:
         return xc
     if xc.ndim > 2:
-        # put spectral dim to dim=1 if possible
-        # after selecting spatial dims, original spectral dim shifts if it was after them
-        # fall back: take the largest non-batch dim as bands
         if xc.ndim >= 3:
             sizes = [(int(xc.shape[i]), i) for i in range(1, xc.ndim)]
             sizes.sort(reverse=True)
@@ -175,27 +167,24 @@ def _forward_logits(
     x_spec: Optional[torch.Tensor],
     *,
     patch_size: int = 15,
+    derive_x_spec: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    # derive x_spec if missing (for models that need it)
-    if x_spec is None:
-        x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)
-
     out = None
-    # try (x, x_spec) first if we have x_spec; otherwise try (x)
-    if x_spec is not None:
-        try:
-            out = model(x, x_spec)
-        except TypeError:
-            out = model(x)
-    else:
+    if x_spec is None:
         try:
             out = model(x)
         except TypeError:
-            # last resort: derive and try again
+            if not bool(derive_x_spec):
+                raise
             x_spec2 = _derive_x_spec_from_x(x, patch_size=patch_size)
             if x_spec2 is None:
                 raise
             out = model(x, x_spec2)
+    else:
+        try:
+            out = model(x, x_spec)
+        except TypeError:
+            out = model(x)
 
     if torch.is_tensor(out):
         return out, None
@@ -239,7 +228,7 @@ def train_one_epoch(
     aug_noise_std: float = 0.0,
     patch_size: int = 15,
     grad_accum_steps: int = 1,
-    steps_per_epoch: int = 0,
+    need_x_spec: bool = True,
 ) -> float:
     model.train()
     if scaler is None:
@@ -249,18 +238,15 @@ def train_one_epoch(
     losses = []
     optimizer.zero_grad(set_to_none=True)
 
-    it_max = None
-    if steps_per_epoch and int(steps_per_epoch) > 0:
-        it_max = int(steps_per_epoch)
-
-    for it, batch in enumerate(dl):
-        if it_max is not None and it >= it_max:
-            break
+    steps_done = 0
+    for batch in dl:
 
         x, x_spec, y = _as_x_xspec_y(batch)
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True).long()
-        if x_spec is not None and torch.is_tensor(x_spec):
+        if not bool(need_x_spec):
+            x_spec = None
+        elif x_spec is not None and torch.is_tensor(x_spec):
             x_spec = x_spec.to(device, non_blocking=True)
 
         if aug_noise_std and float(aug_noise_std) > 0.0:
@@ -269,7 +255,7 @@ def train_one_epoch(
                 x_spec = x_spec + torch.randn_like(x_spec) * float(aug_noise_std)
 
         x = _apply_spec_dropout(x, float(spec_dropout_p), float(spec_dropout_ratio), patch_size=patch_size)
-        if x_spec is None:
+        if bool(need_x_spec) and x_spec is None:
             x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)
 
         do_mix = (mixup_prob > 0.0) and (mixup_alpha > 0.0) and (torch.rand((), device=device).item() < mixup_prob)
@@ -279,7 +265,13 @@ def train_one_epoch(
             y_a, y_b, lam = y, y, 1.0
 
         with torch.autocast(device_type="cuda", enabled=use_amp):
-            logits, _ = _forward_logits(model, x, x_spec, patch_size=patch_size)
+            logits, _ = _forward_logits(
+                model,
+                x,
+                x_spec,
+                patch_size=patch_size,
+                derive_x_spec=bool(need_x_spec),
+            )
 
             if focal_gamma and float(focal_gamma) > 0.0:
                 loss_a = _focal_loss(logits, y_a, float(focal_gamma), label_smoothing=label_smoothing)
@@ -305,7 +297,7 @@ def train_one_epoch(
 
         scaler.scale(loss).backward()
 
-        if (it + 1) % grad_accum_steps == 0:
+        if (steps_done + 1) % grad_accum_steps == 0:
             if grad_clip and float(grad_clip) > 0.0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
@@ -314,9 +306,9 @@ def train_one_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         losses.append(float(loss.detach().item() * float(grad_accum_steps)))
+        steps_done += 1
 
-    # flush remainder
-    if losses and ((it + 1) % grad_accum_steps != 0):
+    if losses and (steps_done % grad_accum_steps != 0):
         if grad_clip and float(grad_clip) > 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
@@ -362,6 +354,109 @@ def _metrics_from_cm(cm: np.ndarray) -> Dict[str, Any]:
     }
 
 
+def _can_use_fast_dataset_eval(dl: Iterable) -> bool:
+    ds = getattr(dl, "dataset", None)
+    if ds is None:
+        return False
+    if bool(getattr(ds, "augment", False)):
+        return False
+    if getattr(ds, "_cube_pad", None) is None:
+        return False
+    needed = ("indices", "gt", "w", "half", "patch_size", "label_offset")
+    return all(hasattr(ds, k) for k in needed)
+
+
+def _evaluate_hsi_dataset_fast(
+    model: torch.nn.Module,
+    dl: Iterable,
+    device: torch.device,
+    *,
+    num_classes: int,
+    use_amp: bool = False,
+    patch_size: int = 15,
+    steps: int = 0,
+    log_prefix: str = "",
+    log_interval: int = 0,
+    need_x_spec: bool = True,
+) -> Dict[str, Any]:
+    ds = getattr(dl, "dataset")
+    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+
+    indices = np.asarray(ds.indices, dtype=np.int64).reshape(-1)
+    if indices.size == 0:
+        return _metrics_from_cm(cm)
+
+    gt = np.asarray(ds.gt, dtype=np.int64)
+    cube_pad = np.asarray(ds._cube_pad, dtype=np.float32)
+    coord_pad = getattr(ds, "_coord_pad", None)
+    if coord_pad is not None:
+        coord_pad = np.asarray(coord_pad, dtype=np.float32)
+    w = int(ds.w)
+    half = int(ds.half)
+    ps = int(ds.patch_size) if int(ds.patch_size) > 0 else int(patch_size)
+    label_offset = int(ds.label_offset)
+
+    bs = int(getattr(dl, "batch_size", 0) or 0)
+    if bs <= 0:
+        bs = 512
+
+    total_steps = (int(indices.size) + bs - 1) // bs
+    it_max = int(steps) if steps and int(steps) > 0 else None
+    if it_max is not None:
+        total_steps = min(total_steps, max(0, int(it_max)))
+
+    lp = str(log_prefix).strip()
+    li = max(0, int(log_interval))
+    offsets = np.arange(ps, dtype=np.int64)
+
+    pred_all = np.empty((int(indices.size),), dtype=np.int64)
+    r_all = indices // w
+    c_all = indices % w
+
+    with torch.no_grad():
+        for it in range(total_steps):
+            start = it * bs
+            end = min(int(indices.size), start + bs)
+            r = r_all[start:end]
+            c = c_all[start:end]
+
+            rr = r[:, None] + offsets[None, :]
+            cc = c[:, None] + offsets[None, :]
+            patches = cube_pad[rr[:, :, None], cc[:, None, :], :]
+            if coord_pad is not None:
+                coord_patches = coord_pad[rr[:, :, None], cc[:, None, :], :]
+                patches = np.concatenate([patches, coord_patches], axis=-1)
+            x_np = np.ascontiguousarray(np.transpose(patches, (0, 3, 1, 2)), dtype=np.float32)
+
+            x_cpu = torch.from_numpy(x_np)
+            if device.type == "cuda":
+                x_cpu = x_cpu.pin_memory()
+            x = x_cpu.to(device, non_blocking=True)
+            x_spec = x[:, :, half, half].contiguous() if bool(need_x_spec) else None
+
+            with torch.autocast(device_type="cuda", enabled=use_amp):
+                logits, _ = _forward_logits(
+                    model,
+                    x,
+                    x_spec,
+                    patch_size=ps,
+                    derive_x_spec=bool(need_x_spec),
+                )
+
+            pred = torch.argmax(logits, dim=1).detach().cpu().numpy().astype(np.int64, copy=False)
+            pred_all[start:end] = pred
+
+            if li > 0 and (((it + 1) % li == 0) or (it == 0)):
+                done = it + 1
+                p = f"{done / max(1, total_steps):.1%}"
+                tag = f"[{lp}] " if lp else ""
+                print(f"{tag}eval {done}/{total_steps} ({p})", flush=True)
+
+    y_np = gt[r_all, c_all].astype(np.int64, copy=False) - label_offset
+    _confusion_matrix_update(cm, y_np, pred_all, num_classes)
+    return _metrics_from_cm(cm)
+
+
 def evaluate(
     model: torch.nn.Module,
     dl: Iterable,
@@ -371,11 +466,40 @@ def evaluate(
     use_amp: bool = False,
     patch_size: int = 15,
     steps: int = 0,
+    log_prefix: str = "",
+    log_interval: int = 0,
+    need_x_spec: bool = True,
 ) -> Dict[str, Any]:
     model.eval()
+    if _can_use_fast_dataset_eval(dl):
+        try:
+            return _evaluate_hsi_dataset_fast(
+                model=model,
+                dl=dl,
+                device=device,
+                num_classes=num_classes,
+                use_amp=use_amp,
+                patch_size=patch_size,
+                steps=steps,
+                log_prefix=log_prefix,
+                log_interval=log_interval,
+                need_x_spec=need_x_spec,
+            )
+        except Exception as e:
+            tag = f"[{str(log_prefix).strip()}] " if str(log_prefix).strip() else ""
+            print(f"{tag}[warn] fast_eval fallback to dataloader path: {e}", flush=True)
+
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
 
     it_max = int(steps) if steps and int(steps) > 0 else None
+    total_steps = None
+    try:
+        total_steps = len(dl)
+    except Exception:
+        total_steps = None
+
+    lp = str(log_prefix).strip()
+    li = max(0, int(log_interval))
 
     with torch.no_grad():
         for it, batch in enumerate(dl):
@@ -384,14 +508,32 @@ def evaluate(
             x, x_spec, y = _as_x_xspec_y(batch)
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
-            if x_spec is not None and torch.is_tensor(x_spec):
+            if not bool(need_x_spec):
+                x_spec = None
+            elif x_spec is not None and torch.is_tensor(x_spec):
                 x_spec = x_spec.to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                logits, _ = _forward_logits(model, x, x_spec, patch_size=patch_size)
+                logits, _ = _forward_logits(
+                    model,
+                    x,
+                    x_spec,
+                    patch_size=patch_size,
+                    derive_x_spec=bool(need_x_spec),
+                )
 
             pred = torch.argmax(logits, dim=1)
             _confusion_matrix_update(cm, y.detach().cpu().numpy(), pred.detach().cpu().numpy(), num_classes)
+
+            if li > 0 and (((it + 1) % li == 0) or (it == 0)):
+                done = it + 1
+                if total_steps is None:
+                    p = "?"
+                else:
+                    p = f"{done / max(1, total_steps):.1%}"
+                tag = f"[{lp}] " if lp else ""
+                denom = str(total_steps) if total_steps is not None else "?"
+                print(f"{tag}eval {done}/{denom} ({p})", flush=True)
 
     out = _metrics_from_cm(cm)
     return out

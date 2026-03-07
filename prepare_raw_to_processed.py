@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Prepare raw .mat -> processed .npy (cube.npy / gt.npy)
 
@@ -32,9 +31,8 @@ def _is_numeric_ndarray(x: Any) -> bool:
 
 
 def _load_mat_scipy(path: Path) -> Dict[str, Any]:
-    from scipy.io import loadmat  # lazy import
+    from scipy.io import loadmat
     d = loadmat(str(path))
-    # filter matlab metadata keys
     out = {}
     for k, v in d.items():
         if k.startswith("__"):
@@ -64,19 +62,16 @@ def _load_mat_h5py(path: Path) -> Dict[str, Any]:
             try:
                 out[k] = _read_h5_dataset(obj)
             except Exception:
-                # ignore unsupported groups/refs in this lightweight loader
                 pass
     return out
 
 
 def load_mat_any(path: Path) -> Dict[str, Any]:
-    # try scipy first, fallback to h5py for v7.3
     try:
         return _load_mat_scipy(path)
     except NotImplementedError:
         return _load_mat_h5py(path)
     except Exception:
-        # if scipy fails for other reasons, also try h5py
         try:
             return _load_mat_h5py(path)
         except Exception as e:
@@ -84,7 +79,6 @@ def load_mat_any(path: Path) -> Dict[str, Any]:
 
 
 def _squeeze_mat_array(a: np.ndarray) -> np.ndarray:
-    # matlab often stores as (H,W,B) or (1,H,W,B) etc.
     a = np.array(a)
     a = np.squeeze(a)
     return a
@@ -98,7 +92,6 @@ def auto_detect_keys(
     cube_key = None
     gt_key = None
 
-    # choose cube: numeric ndarray with ndim==3 and largest size
     if require_cube:
         cand = []
         for k, v in mat.items():
@@ -111,7 +104,6 @@ def auto_detect_keys(
             cand.sort(reverse=True)
             cube_key = cand[0][1]
 
-    # choose gt: numeric ndarray with ndim==2 and looks like labels (small integer range)
     if require_gt:
         cand = []
         for k, v in mat.items():
@@ -120,7 +112,6 @@ def auto_detect_keys(
             a = _squeeze_mat_array(v)
             if _is_numeric_ndarray(a) and a.ndim == 2:
                 aa = a
-                # heuristic: label maps usually have small max (<= 1000) and many repeats
                 mx = float(np.max(aa))
                 mn = float(np.min(aa))
                 if mx <= 5000 and mn >= 0:
@@ -134,7 +125,6 @@ def auto_detect_keys(
 
 def _standardize_gt(gt: np.ndarray) -> np.ndarray:
     gt = _squeeze_mat_array(gt)
-    # sometimes stored as float; cast to int64
     if gt.ndim == 3 and 1 in gt.shape:
         gt = np.squeeze(gt)
     if gt.ndim != 2:
@@ -145,30 +135,24 @@ def _standardize_gt(gt: np.ndarray) -> np.ndarray:
 def _standardize_cube(cube: np.ndarray, gt_shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
     cube = _squeeze_mat_array(cube)
 
-    # Some datasets are stored as (Bands, H*W) or (H*W, Bands)
     if cube.ndim == 2 and gt_shape is not None:
         H, W = gt_shape
         HW = H * W
         a, b = cube.shape
-        # case: (B, HW)
         if b == HW and a <= 512:
-            cube = cube.reshape(a, H, W)  # (B,H,W)
-        # case: (HW, B)
+            cube = cube.reshape(a, H, W)
         elif a == HW and b <= 512:
-            cube = cube.reshape(H, W, b)  # (H,W,B)
+            cube = cube.reshape(H, W, b)
 
     if cube.ndim != 3:
         raise ValueError(f"Cube must be 3D after reshape/squeeze, got shape={cube.shape}")
 
-    # Ensure cube is (H,W,B)
-    # Only move axis if one dim is clearly the spectral bands (much smaller than the other two)
     shp = list(cube.shape)
     s = sorted(shp)
-    # heuristic: smallest dim is bands if it is <= 0.6 * second_smallest and <= 256
     if s[0] <= 0.6 * s[1] and s[0] <= 256:
         band_dim = int(np.argmin(shp))
         if band_dim != 2:
-            cube = np.moveaxis(cube, band_dim, -1)  # put bands to last
+            cube = np.moveaxis(cube, band_dim, -1)
 
     return cube.astype(np.float32)
 
@@ -202,7 +186,6 @@ def main():
     gt_mat = load_mat_any(gt_file)
 
     if not cube_key or not gt_key:
-        # auto-detect independently (safer)
         auto_cube_key, _ = auto_detect_keys(cube_mat, require_cube=True, require_gt=False)
         _, auto_gt_key = auto_detect_keys(gt_mat, require_cube=False, require_gt=True)
         cube_key = cube_key or (auto_cube_key or "")

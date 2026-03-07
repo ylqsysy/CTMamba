@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
@@ -39,19 +38,16 @@ class WarmupCosine:
         if hasattr(optimizer_or_base_lr, "param_groups"):
             self.optimizer = optimizer_or_base_lr
 
-            # derive per-group base LR
             if base_lr is None:
                 self.base_lrs = [float(g.get("lr", 0.0)) for g in self.optimizer.param_groups]
             else:
                 base_lr = float(base_lr)
-                # preserve current group ratios relative to group0
                 g0_lr = float(self.optimizer.param_groups[0].get("lr", base_lr))
                 if abs(g0_lr) < 1e-12:
                     g0_lr = base_lr
                 ratios = [float(g.get("lr", g0_lr)) / g0_lr for g in self.optimizer.param_groups]
                 self.base_lrs = [base_lr * r for r in ratios]
 
-            # scale min_lr with ratios too (so groups keep proportional schedule)
             if len(self.base_lrs) > 0:
                 base0 = float(self.base_lrs[0])
                 if abs(base0) < 1e-12:
@@ -60,15 +56,14 @@ class WarmupCosine:
             else:
                 self.min_lrs = []
         else:
-            # legacy scalar scheduler
             self.optimizer = None
             self.base_lrs = [float(optimizer_or_base_lr)]
             self.min_lrs = [float(self.min_lr)]
 
     def _lr_at(self, epoch: int, base_lr: float, min_lr: float) -> float:
-        ep = int(epoch)
-        if self.warmup_epochs > 0 and ep <= self.warmup_epochs:
-            return base_lr * float(ep) / float(max(1, self.warmup_epochs))
+        ep = max(0, int(epoch))
+        if self.warmup_epochs > 0 and ep < self.warmup_epochs:
+            return base_lr * float(ep + 1) / float(max(1, self.warmup_epochs))
 
         denom = max(1, self.max_epochs - self.warmup_epochs)
         t = float(ep - self.warmup_epochs) / float(denom)
@@ -94,7 +89,6 @@ class WarmupCosine:
             lrs.append(float(lr))
         return lrs
 
-    # compatibility with earlier train.py variants
     def step_epoch(self, epoch: int) -> List[float]:
         return self.step(epoch)
 
