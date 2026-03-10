@@ -1,13 +1,19 @@
-# TriScanMamba
+# CenterTargetMamba (CTMamba)
 
-PyTorch code for hyperspectral image classification.
+PyTorch code for hyperspectral image classification with a fixed CTMamba architecture.
 
-Current `TriScanMamba` keeps the original model name and focuses on a compact, reproducible design:
+## Model Definition
 
-- spatial selective-scan backbone
-- spectral branch with cross-attention fusion
-- learnable band tokenizer (optional)
-- optional absolute coordinate channels (`append_coords`)
+CTMamba uses a fixed front-end, backbone, and back-end:
+
+- Front-end: `1x1` spectral projection (`conv1x1`)
+- Backbone: raster-route spatial selective scan blocks
+- Back-end: MLP classifier head input feature fusion
+- Structured adapters: `CCA + CPA + BCA + RSA`
+
+Main model file:
+
+- `models/ctmamba.py`
 
 ## Install
 
@@ -17,21 +23,20 @@ pip install numpy scipy pyyaml torch h5py scikit-learn tqdm joblib
 
 ## Minimal Workflow
 
-1. Convert raw `.mat` files to `cube.npy` / `gt.npy`.
+1. Convert raw `.mat` to `cube.npy` and `gt.npy`.
 2. Generate split JSON files.
 3. Train.
 4. Evaluate.
 
-Use these scripts:
+Scripts:
 
 - `prepare_raw_to_processed.py`
 - `make_splits.py`
 - `train.py`
 - `eval.py`
 - `run_multiseed.py`
-- `run_ablations.py`
 
-Each script provides full argument definitions:
+Help for each script:
 
 ```bash
 python <script>.py --help
@@ -39,11 +44,11 @@ python <script>.py --help
 
 ## Example
 
-Train/eval one seed on Hanchuan:
+Run one seed on Pavia University:
 
 ```bash
 python run_multiseed.py \
-  --dataset hanchuan \
+  --dataset pavia_university \
   --split_tag random \
   --seeds 0 \
   --amp \
@@ -53,21 +58,25 @@ python run_multiseed.py \
 
 ## Main Configs
 
-- Model: `configs/model/vssm3d_hanchuan.yaml`
-- Train: `configs/train/hanchuan.yaml`
-- Dataset: `configs/datasets/hanchuan.yaml`
+- Model: `configs/model/ctmamba_pavia_university.yaml`
+- Train: `configs/train/pu.yaml`
+- Dataset: `configs/datasets/pavia_university.yaml`
 
-All released TriScanMamba configs keep `patch_size=15` (Hanchuan/Houston2013/Honghu/PU) to control runtime.
-Hanchuan default training disables mixup, enables coordinate channels, and uses single-pass evaluation
-(no TTA, no post-processing).
+All released CTMamba configs currently use `patch_size=15`.
 
-## Verified Result (hanchuan, seed0)
+## Output Schema
 
-- Baseline checkpoint: `outputs/checkpoints/hanchuan_seed0/metrics.json`
-  - TEST OA `0.9317295`, AA `0.9212653`, Kappa `0.9203114`
-- Updated checkpoint (no TTA, no post-processing): `outputs/checkpoints_hanchuan_p15_coords_nomix1/hanchuan_seed0/metrics.json`
-  - TEST OA `0.9581027`, AA `0.9566976`, Kappa `0.9511179`
-  - Delta: OA `+0.0263732`, AA `+0.0354323`, Kappa `+0.0308065`
+Single-seed `metrics.json` includes:
+
+- `VAL` / `TEST`: OA, AA, Kappa (and optional class-wise outputs)
+- `time_sec`
+- `meta`: dataset/split/seed/config hashes/parameter counts
+
+Multi-seed `mean_metrics.json` includes:
+
+- `per_seed` and `per_seed_full`
+- `mean` / `std`
+- optional runtime and parameter summaries
 
 ## License
 

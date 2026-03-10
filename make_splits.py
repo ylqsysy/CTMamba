@@ -729,7 +729,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset_cfg", required=True)
     ap.add_argument("--split_tag", default="random")
-    ap.add_argument("--seeds", default="0", help='e.g. "0-9" or "0,1,2" or "0"')
+    ap.add_argument("--seeds", default="0,1,2", help='e.g. "0,1,2" or "0-2" or "0"')
     ap.add_argument("--train_ratio", type=float, default=0.10)
     ap.add_argument("--val_ratio", type=float, default=0.10)
     ap.add_argument("--data_root", default="data")

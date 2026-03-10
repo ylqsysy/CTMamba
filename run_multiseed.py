@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import yaml
@@ -57,6 +58,23 @@ def _write_json(p: Path, obj: Dict[str, Any]) -> None:
     p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _sha1_file(p: Path) -> str:
+    h = hashlib.sha1()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _signature_matches(meta: Dict[str, Any], expected: Dict[str, Any]) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    for k, v in expected.items():
+        if str(meta.get(k, "")) != str(v):
+            return False
+    return True
+
+
 def _sanitize_tag(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9_]+", "_", s)
@@ -68,10 +86,10 @@ def _infer_paths(dataset: str) -> Tuple[Path, Path, Path]:
     d = REPO_ROOT / "configs" / "datasets" / f"{dataset}.yaml"
 
     model_map = {
-        "pavia_university": "vssm3d_pu.yaml",
-        "houston2013": "vssm3d_houston2013.yaml",
-        "hanchuan": "vssm3d_hanchuan.yaml",
-        "honghu": "vssm3d_honghu.yaml",
+        "pavia_university": "ctmamba_pavia_university.yaml",
+        "houston2013": "ctmamba_houston2013.yaml",
+        "hanchuan": "ctmamba_hanchuan.yaml",
+        "honghu": "ctmamba_honghu.yaml",
     }
     m = REPO_ROOT / "configs" / "model" / model_map[dataset]
 
@@ -132,7 +150,12 @@ def _pick_split_dict(d: Dict[str, Any], split: str) -> Dict[str, Any]:
     raise KeyError(f"missing split '{split}' in metrics json. keys={list(d.keys())}")
 
 
-def _try_load_metrics(metrics_json: Path, eval_json: Path) -> Tuple[Dict[str, Any] | None, Path | None]:
+def _try_load_metrics(
+    metrics_json: Path,
+    eval_json: Path,
+    *,
+    expected_meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any] | None, Path | None]:
     for p in (metrics_json, eval_json):
         if not p.exists():
             continue
@@ -140,13 +163,23 @@ def _try_load_metrics(metrics_json: Path, eval_json: Path) -> Tuple[Dict[str, An
             d = _load_json(p)
             _pick_split_dict(d, "val")
             _pick_split_dict(d, "test")
+            if expected_meta is not None:
+                meta = d.get("meta", {})
+                if not _signature_matches(meta, expected_meta):
+                    print(f"[warn] stale metrics file ignored (signature mismatch): {p}")
+                    continue
             return d, p
         except Exception as e:
             print(f"[warn] invalid metrics file ignored: {p} ({e})")
     return None, None
 
 
-def _mean_metrics_complete(mean_json: Path, seeds: List[int]) -> bool:
+def _mean_metrics_complete(
+    mean_json: Path,
+    seeds: List[int],
+    *,
+    expected_meta: Optional[Dict[str, Any]] = None,
+) -> bool:
     if not mean_json.exists():
         return False
     try:
@@ -165,6 +198,10 @@ def _mean_metrics_complete(mean_json: Path, seeds: List[int]) -> bool:
             for k in ("OA", "AA", "Kappa"):
                 float(sv[k])
                 float(st[k])
+        if expected_meta is not None:
+            meta = d.get("meta", {})
+            if not _signature_matches(meta, expected_meta):
+                return False
         return True
     except Exception:
         return False
@@ -217,7 +254,7 @@ def main() -> None:
     ap.add_argument("--split_tag", default="random", choices=["random"])
     ap.add_argument("--data_root", default="data")
     ap.add_argument("--out_base", default="outputs/checkpoints")
-    ap.add_argument("--seeds", default="0-9")
+    ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument(
         "--num_workers",
@@ -262,6 +299,11 @@ def main() -> None:
     dataset_cfg = _pick_path(args.dataset_cfg_path, inf_dataset_cfg, "dataset_cfg")
     model_cfg = _pick_path(args.model_cfg_path, inf_model_cfg, "model_cfg")
     train_cfg = _pick_path(args.train_cfg_path, inf_train_cfg, "train_cfg")
+    cfg_meta = {
+        "dataset_cfg_sha1": _sha1_file(dataset_cfg),
+        "model_cfg_sha1": _sha1_file(model_cfg),
+        "train_cfg_sha1": _sha1_file(train_cfg),
+    }
     train_cfg_obj = _load_yaml(train_cfg)
     split_dir = REPO_ROOT / "splits" / args.split_tag
 
@@ -289,14 +331,18 @@ def main() -> None:
 
     mean_dir = out_base / f"{tag}_mean{n_seeds}"
     mean_json = mean_dir / "mean_metrics.json"
-    if (not bool(args.force)) and _mean_metrics_complete(mean_json, seeds):
+    if (not bool(args.force)) and _mean_metrics_complete(mean_json, seeds, expected_meta=cfg_meta):
         print(f"[info] skip dataset: complete result exists -> {mean_json}")
         return
 
     keys = ["OA", "AA", "Kappa"]
     per_seed = {"val": {}, "test": {}}
+    per_seed_full = {"val": {}, "test": {}, "meta": {}}
     test_vals = {k: [] for k in keys}
     val_vals = {k: [] for k in keys}
+    run_time_vals: List[float] = []
+    params_total_vals: List[float] = []
+    params_trainable_vals: List[float] = []
 
     for seed in seeds:
         out_dir = out_base / f"{tag}_seed{seed}"
@@ -307,12 +353,27 @@ def main() -> None:
         ckpt_best = out_dir / "checkpoints" / "best.pt"
         metrics_json = out_dir / "metrics.json"
         eval_json = out_dir / "eval.json"
+        run_sig_json = out_dir / "meta" / "run_signature.json"
+        split_json_sha1 = _sha1_file(split_json)
+        expected_seed_meta = {
+            **cfg_meta,
+            "split_json_sha1": split_json_sha1,
+            "seed": int(seed),
+        }
 
-        d, found_metrics = _try_load_metrics(metrics_json, eval_json)
+        d, found_metrics = _try_load_metrics(metrics_json, eval_json, expected_meta=expected_seed_meta)
         if d is not None:
             print(f"[info] skip seed={seed}: found metrics -> {found_metrics}")
         else:
-            if not ckpt_best.exists():
+            can_reuse_ckpt = False
+            if ckpt_best.exists() and run_sig_json.exists():
+                try:
+                    sig = _load_json(run_sig_json)
+                    can_reuse_ckpt = _signature_matches(sig, expected_seed_meta)
+                except Exception:
+                    can_reuse_ckpt = False
+
+            if not can_reuse_ckpt:
                 cmd_train = [
                     str(args.python),
                     "train.py",
@@ -329,15 +390,16 @@ def main() -> None:
                     cmd_train.append("--amp")
                 _run(cmd_train)
             else:
-                print("[info] skip train: found", ckpt_best)
+                print("[info] skip train: found compatible checkpoint/signature", ckpt_best)
 
-            d, found_metrics = _try_load_metrics(metrics_json, eval_json)
+            d, found_metrics = _try_load_metrics(metrics_json, eval_json, expected_meta=expected_seed_meta)
             if d is None:
                 cmd_eval = [
                     str(args.python),
                     "eval.py",
                     "--dataset_cfg", str(dataset_cfg),
                     "--model_cfg", str(model_cfg),
+                    "--train_cfg", str(train_cfg),
                     "--split_json", str(split_json),
                     "--data_root", str(args.data_root),
                     "--seed", str(seed),
@@ -351,18 +413,31 @@ def main() -> None:
                 if args.amp:
                     cmd_eval.append("--amp")
                 _run_capture(cmd_eval)
-                d, found_metrics = _try_load_metrics(metrics_json, eval_json)
+                d, found_metrics = _try_load_metrics(metrics_json, eval_json, expected_meta=expected_seed_meta)
             if d is None:
                 raise SystemExit(f"[ERROR] missing valid metrics after train/eval for seed={seed}: {out_dir}")
 
         v = _pick_split_dict(d, "val")
         t = _pick_split_dict(d, "test")
+        meta_seed = d.get("meta", {}) if isinstance(d.get("meta", {}), dict) else {}
 
         per_seed["val"][str(seed)] = {k: float(v[k]) for k in keys}
         per_seed["test"][str(seed)] = {k: float(t[k]) for k in keys}
+        per_seed_full["val"][str(seed)] = dict(v)
+        per_seed_full["test"][str(seed)] = dict(t)
+        per_seed_full["meta"][str(seed)] = dict(meta_seed)
         for k in keys:
             val_vals[k].append(float(v[k]))
             test_vals[k].append(float(t[k]))
+        t_sec = d.get("time_sec", meta_seed.get("time_sec"))
+        if isinstance(t_sec, (int, float)):
+            run_time_vals.append(float(t_sec))
+        p_total = meta_seed.get("num_params_total")
+        if isinstance(p_total, (int, float)):
+            params_total_vals.append(float(p_total))
+        p_train = meta_seed.get("num_params_trainable")
+        if isinstance(p_train, (int, float)):
+            params_trainable_vals.append(float(p_train))
 
     def mean_std(xs: List[float]):
         a = np.asarray(xs, dtype=float)
@@ -374,10 +449,32 @@ def main() -> None:
         mean["val"][k], std["val"][k] = mean_std(val_vals[k])
         mean["test"][k], std["test"][k] = mean_std(test_vals[k])
 
+    per_class_summary: Dict[str, Dict[str, List[float]]] = {}
+    for split_name in ("val", "test"):
+        arrs: List[np.ndarray] = []
+        valid = True
+        for seed in seeds:
+            blk = per_seed_full[split_name].get(str(seed), {})
+            if not isinstance(blk, dict):
+                valid = False
+                break
+            pc = blk.get("per_class_acc")
+            if not isinstance(pc, list) or len(pc) == 0:
+                valid = False
+                break
+            arrs.append(np.asarray(pc, dtype=np.float64).reshape(-1))
+        if valid and arrs and all(a.shape == arrs[0].shape for a in arrs):
+            mat = np.stack(arrs, axis=0)
+            per_class_summary[split_name] = {
+                "mean": np.mean(mat, axis=0).astype(float).tolist(),
+                "std": np.std(mat, axis=0, ddof=0).astype(float).tolist(),
+            }
+
     mean_dir.mkdir(parents=True, exist_ok=True)
 
     out = {
         "per_seed": per_seed,
+        "per_seed_full": per_seed_full,
         "mean": mean,
         "std": std,
         "meta": {
@@ -386,9 +483,35 @@ def main() -> None:
             "seed_spec": str(args.seeds),
             "num_seeds": int(n_seeds),
             "seeds": [int(x) for x in seeds],
-            "protocol": f"RANDOM only; {n_seeds} seeds ({args.seeds}); STRICT split_json indices; no TTA; mean±std reported",
+            "protocol": f"RANDOM only; {n_seeds} seeds ({args.seeds}); STRICT split_json indices; single-pass eval; mean±std reported",
+            "dataset_cfg": str(dataset_cfg),
+            "model_cfg": str(model_cfg),
+            "train_cfg": str(train_cfg),
+            "dataset_cfg_sha1": _sha1_file(dataset_cfg),
+            "model_cfg_sha1": _sha1_file(model_cfg),
+            "train_cfg_sha1": _sha1_file(train_cfg),
         },
     }
+    if run_time_vals:
+        out["time_sec"] = {
+            "per_seed": run_time_vals,
+            "mean": float(np.mean(np.asarray(run_time_vals, dtype=np.float64))),
+            "std": float(np.std(np.asarray(run_time_vals, dtype=np.float64), ddof=0)),
+        }
+    if params_total_vals:
+        out["params_total"] = {
+            "per_seed": params_total_vals,
+            "mean": float(np.mean(np.asarray(params_total_vals, dtype=np.float64))),
+            "std": float(np.std(np.asarray(params_total_vals, dtype=np.float64), ddof=0)),
+        }
+    if params_trainable_vals:
+        out["params_trainable"] = {
+            "per_seed": params_trainable_vals,
+            "mean": float(np.mean(np.asarray(params_trainable_vals, dtype=np.float64))),
+            "std": float(np.std(np.asarray(params_trainable_vals, dtype=np.float64), ddof=0)),
+        }
+    if per_class_summary:
+        out["per_class_acc"] = per_class_summary
     _write_json(mean_dir / "mean_metrics.json", out)
 
     lines = ["seed,val_OA,val_AA,val_Kappa,test_OA,test_AA,test_Kappa"]

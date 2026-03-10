@@ -107,10 +107,7 @@ class HSIPatchDataset(Dataset):
     label_offset: int = 1
     augment: bool = False
     return_x_spec: bool = True
-    append_coords: bool = False
 
-    spec_dropout_p: float = 0.0
-    spec_dropout_ratio: float = 0.0
     noise_std: float = 0.0
 
     def __post_init__(self) -> None:
@@ -151,31 +148,15 @@ class HSIPatchDataset(Dataset):
             raise ValueError(f"[HSIPatchDataset] std bands mismatch: std={self.std.shape[-1]} vs cube_bands={self.b}")
         self.std = np.maximum(self.std, 1e-6).astype(np.float32)
 
-        self.spec_dropout_p = float(self.spec_dropout_p)
-        self.spec_dropout_ratio = float(self.spec_dropout_ratio)
         self.noise_std = float(self.noise_std)
         self.return_x_spec = bool(self.return_x_spec)
-        self.append_coords = bool(self.append_coords)
 
         self._cube_pad = _get_or_build_norm_padded_cube(self.cube, self.mean, self.std, self.half)
-        if self.append_coords:
-            yy = np.linspace(-1.0, 1.0, self.h, dtype=np.float32)
-            xx = np.linspace(-1.0, 1.0, self.w, dtype=np.float32)
-            gy, gx = np.meshgrid(yy, xx, indexing="ij")
-            coord = np.stack([gy, gx], axis=-1)
-            self._coord_pad = np.pad(coord, ((self.half, self.half), (self.half, self.half), (0, 0)), mode="edge")
-            self._coord_pad = np.ascontiguousarray(self._coord_pad, dtype=np.float32)
-        else:
-            self._coord_pad = None
 
     def __len__(self) -> int:
         return int(self.indices.size)
 
-    def _spatial_aug(
-        self,
-        patch: np.ndarray,
-        coord_patch: np.ndarray | None = None,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    def _spatial_aug(self, patch: np.ndarray) -> np.ndarray:
         """
         random flip / rotation (HSI-safe: preserves spectrum, changes spatial)
 
@@ -186,31 +167,15 @@ class HSIPatchDataset(Dataset):
         """
         if np.random.rand() < 0.5:
             patch = patch[::-1, :, :]
-            if coord_patch is not None:
-                coord_patch = coord_patch[::-1, :, :]
         if np.random.rand() < 0.5:
             patch = patch[:, ::-1, :]
-            if coord_patch is not None:
-                coord_patch = coord_patch[:, ::-1, :]
         k = int(np.random.randint(0, 4))
         if k:
             patch = np.rot90(patch, k, axes=(0, 1))
-            if coord_patch is not None:
-                coord_patch = np.rot90(coord_patch, k, axes=(0, 1))
         patch = np.ascontiguousarray(patch)
-        if coord_patch is None:
-            return patch
-        coord_patch = np.ascontiguousarray(coord_patch)
-        return patch, coord_patch
+        return patch
 
     def _spectral_aug(self, patch: np.ndarray) -> np.ndarray:
-        if self.spec_dropout_p > 0.0 and self.spec_dropout_ratio > 0.0 and np.random.rand() < self.spec_dropout_p:
-            b = patch.shape[-1]
-            k = int(round(b * self.spec_dropout_ratio))
-            k = max(1, min(b, k))
-            idx = np.random.choice(b, size=k, replace=False)
-            patch[..., idx] = 0.0
-
         if self.noise_std > 0.0:
             noise = np.random.normal(0.0, self.noise_std, size=patch.shape).astype(np.float32)
             patch = patch + noise
@@ -257,21 +222,11 @@ class HSIPatchDataset(Dataset):
 
             patch = (patch - self.mean) / self.std
 
-        coord_patch = None
-        if self._coord_pad is not None:
-            coord_patch = self._coord_pad[r : r + self.patch_size, c : c + self.patch_size, :]
-
         if self.augment:
-            if coord_patch is None:
-                patch = self._spatial_aug(patch)
-            else:
-                patch, coord_patch = self._spatial_aug(patch, coord_patch)
+            patch = self._spatial_aug(patch)
             patch = self._spectral_aug(patch)
 
         patch = np.ascontiguousarray(patch, dtype=np.float32)
-        if coord_patch is not None:
-            coord_patch = np.ascontiguousarray(coord_patch, dtype=np.float32)
-            patch = np.concatenate([patch, coord_patch], axis=-1)
 
         x_np = np.ascontiguousarray(patch.transpose(2, 0, 1), dtype=np.float32)
         x = torch.from_numpy(x_np)
@@ -288,15 +243,13 @@ def compute_train_norm(
     train_indices: np.ndarray,
     *,
     mean_global_blend: float = 0.0,
-    std_global_ratio: float = 0.05,
     std_abs_floor: float = 1e-3,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Per-band mean/std with optional global floor for numerical stability.
+    Per-band mean/std from train pixels with optional absolute std floor.
 
     - mean: (1-mean_global_blend)*train_mean + mean_global_blend*global_mean
-    - std : max(train_std, global_std * std_global_ratio, std_abs_floor)
-    - global_* terms are computed from the full cube values (all pixels).
+    - std : max(train_std, std_abs_floor)
     """
     cube = np.asarray(cube)
     if cube.ndim != 3:
@@ -332,10 +285,7 @@ def compute_train_norm(
     mean = ((1.0 - w) * train_mean + w * global_mean).astype(np.float32)
 
     train_std = train_vals.std(axis=0).astype(np.float32)
-    global_std = flat.std(axis=0).astype(np.float32)
-
-    std_floor = np.maximum(float(std_abs_floor), global_std * float(std_global_ratio)).astype(np.float32)
-    std = np.maximum(train_std, std_floor).astype(np.float32)
+    std = np.maximum(train_std, float(std_abs_floor)).astype(np.float32)
 
     std = np.maximum(std, 1e-6).astype(np.float32)
     return mean, std

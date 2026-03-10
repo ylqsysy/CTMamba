@@ -9,10 +9,12 @@ across repeated runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 from pathlib import Path
 from typing import Dict, Any
 import sys
+import time
 
 import numpy as np
 import torch
@@ -25,91 +27,16 @@ from utils.io import load_yaml, load_json, ensure_dir, save_json
 from utils.seed import set_global_seed
 from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
 from utils.engine import evaluate as engine_evaluate
-from models import VSSM3DConfig, VSSM3DModel
+from models import CTMambaConfig, CTMambaModel
 
 
-def _metrics_from_cm(cm: np.ndarray) -> Dict[str, float]:
-    cm = cm.astype(np.float64, copy=False)
-    n = cm.sum()
-    if n <= 0:
-        return {"OA": 0.0, "AA": 0.0, "Kappa": 0.0}
-
-    tp = np.diag(cm)
-    support = cm.sum(axis=1)
-    pred = cm.sum(axis=0)
-
-    oa = float(tp.sum() / n)
-
-    valid = support > 0
-    acc_per_class = np.zeros_like(support)
-    acc_per_class[valid] = tp[valid] / support[valid]
-    aa = float(acc_per_class[valid].mean()) if valid.any() else 0.0
-
-    pe = float((support * pred).sum() / (n * n))
-    kappa = float((oa - pe) / max(1e-12, 1.0 - pe))
-    return {"OA": oa, "AA": aa, "Kappa": kappa}
-
-
-def _extract_logits(out: Any) -> torch.Tensor:
-    if torch.is_tensor(out):
-        return out
-    if isinstance(out, (list, tuple)) and len(out) > 0 and torch.is_tensor(out[0]):
-        return out[0]
-    if isinstance(out, dict):
-        for k in ("logits", "pred", "y", "scores"):
-            if k in out and torch.is_tensor(out[k]):
-                return out[k]
-        vals = [v for v in out.values() if torch.is_tensor(v)]
-        if vals:
-            return vals[0]
-    raise TypeError(f"Unsupported model output type: {type(out)}")
-
-
-@torch.no_grad()
-def _eval_metrics(
-    model: torch.nn.Module,
-    dl: DataLoader,
-    device: torch.device,
-    num_classes: int,
-    *,
-    use_amp: bool = False,
-    log_prefix: str = "",
-    log_interval: int = 0,
-) -> Dict[str, float]:
-    model.eval()
-    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
-    try:
-        total_steps = len(dl)
-    except Exception:
-        total_steps = None
-    lp = str(log_prefix).strip()
-    li = max(0, int(log_interval))
-
-    for it, (x, x_spec, y) in enumerate(dl):
-        x = x.to(device, non_blocking=True)
-        x_spec = x_spec.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-
-        with torch.autocast(device_type="cuda", enabled=use_amp):
-            out = model(x, x_spec)
-        logits = _extract_logits(out)
-        pred = torch.argmax(logits, dim=1)
-
-        yt = y.detach().cpu().numpy().astype(np.int64, copy=False)
-        yp = pred.detach().cpu().numpy().astype(np.int64, copy=False)
-        np.add.at(cm, (yt, yp), 1)
-
-        if li > 0 and (((it + 1) % li == 0) or (it == 0)):
-            done = it + 1
-            if total_steps is None:
-                p = "?"
-            else:
-                p = f"{done / max(1, total_steps):.1%}"
-            tag = f"[{lp}] " if lp else ""
-            denom = str(total_steps) if total_steps is not None else "?"
-            print(f"{tag}eval {done}/{denom} ({p})", flush=True)
-
-    return _metrics_from_cm(cm)
+def _sha1_file(path: str | Path) -> str:
+    p = Path(path)
+    h = hashlib.sha1()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _filter_kwargs_by_signature(fn_or_cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,10 +68,23 @@ def _make_model(model_cfg: Dict[str, Any], num_classes: int, raw_bands: int) -> 
     cfg_in["num_classes"] = int(num_classes)
     cfg_in["raw_bands"] = int(raw_bands)
 
-    allowed = set(getattr(VSSM3DConfig, "__annotations__", {}).keys())
-    cfg_kwargs = {k: v for k, v in cfg_in.items() if k in allowed}
-    cfg = VSSM3DConfig(**cfg_kwargs)
-    return VSSM3DModel(cfg)
+    allowed = set(getattr(CTMambaConfig, "__annotations__", {}).keys())
+    unknown = sorted([k for k in cfg_in.keys() if k not in allowed])
+    if unknown:
+        raise ValueError(
+            f"Unknown model config keys: {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
+        )
+    cfg = CTMambaConfig(**cfg_in)
+    return CTMambaModel(cfg)
+
+
+def _resolve_num_classes(split: Dict[str, Any], dataset_cfg: Dict[str, Any], gt: np.ndarray, label_offset: int) -> int:
+    fallback = int(gt.max()) - int(label_offset) + 1
+    num_classes = int(split.get("num_classes", dataset_cfg.get("num_classes", fallback)))
+    if num_classes <= 0:
+        raise ValueError(f"num_classes must be > 0, got {num_classes}")
+    return int(num_classes)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -162,12 +102,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cuda")
     p.add_argument("--amp", action="store_true")
     p.add_argument("--log_interval", type=int, default=0, help="Print eval progress every N steps (0=off).")
+    p.add_argument("--train_cfg", default="", help="Optional train config path (for hash metadata consistency checks).")
     p.add_argument("--out", required=True)
     return p
 
 
 def main() -> None:
     args = _build_parser().parse_args()
+    t0 = time.time()
     set_global_seed(int(args.seed))
 
     dcfg = load_yaml(args.dataset_cfg)
@@ -183,16 +125,13 @@ def main() -> None:
     gt = np.load(raw_dir / "gt.npy")
 
     label_offset = int(split.get("label_offset", dcfg.get("label_offset", 1)))
-    num_classes = int(gt.max()) - label_offset + 1
-    if num_classes <= 1:
-        raise SystemExit(f"[ERROR] bad num_classes={num_classes}, label_offset={label_offset}, gt.max={int(gt.max())}")
+    num_classes = _resolve_num_classes(split, dcfg, gt, label_offset)
 
     tr_idx = np.asarray(split.get("train_indices", split.get("train", [])), dtype=np.int64)
     va_idx = np.asarray(split.get("val_indices", split.get("val", [])), dtype=np.int64)
     te_idx = np.asarray(split.get("test_indices", split.get("test", [])), dtype=np.int64)
 
     patch_size = int(mcfg.get("patch_size", dcfg.get("patch_size", 15)))
-    append_coords = bool(mcfg.get("append_coords", False))
 
     ckpt_path = Path(args.ckpt)
     out_dir = ckpt_path.parent.parent
@@ -212,7 +151,7 @@ def main() -> None:
         "mean": mean,
         "std": std,
         "augment": False,
-        "append_coords": append_coords,
+        "return_x_spec": False,
     }
 
     def make_ds(indices: np.ndarray):
@@ -232,8 +171,10 @@ def main() -> None:
                        persistent_workers=False)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model_raw_bands = int(cube.shape[-1] + (2 if append_coords else 0))
+    model_raw_bands = int(cube.shape[-1])
     model = _make_model(mcfg, num_classes=num_classes, raw_bands=model_raw_bands).to(device)
+    num_params_total = int(sum(p.numel() for p in model.parameters()))
+    num_params_trainable = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     ck = _torch_load_compat(str(ckpt_path), map_location="cpu")
     state = ck.get(args.ckpt_key, ck)
@@ -242,9 +183,12 @@ def main() -> None:
     use_amp = bool(args.amp and device.type == "cuda")
     log_interval = max(0, int(args.log_interval))
     print(
-        f"[eval] dataset={dataset} seed={args.seed} "
-        f"VAL_samples={len(ds_va)} TEST_samples={len(ds_te)} "
-        f"batch={int(args.batch_size)} workers={int(args.num_workers)} amp={use_amp}"
+        f"[run] mode=eval model=CenterTargetMamba dataset={dataset} seed={int(args.seed)} "
+        f"device={device.type} amp={use_amp} patch={patch_size}"
+    )
+    print(
+        f"[run] split={len(ds_va)}/{len(ds_te)}(val/te) "
+        f"batch={int(args.batch_size)} workers={int(args.num_workers)} ckpt_key={args.ckpt_key}"
     )
     val_m = engine_evaluate(
         model=model,
@@ -253,6 +197,7 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=use_amp,
         patch_size=patch_size,
+        need_x_spec=False,
         log_prefix="eval_val",
         log_interval=log_interval,
     )
@@ -263,23 +208,38 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=use_amp,
         patch_size=patch_size,
+        need_x_spec=False,
         log_prefix="eval_test",
         log_interval=log_interval,
     )
 
+    train_cfg_path = Path(str(args.train_cfg)).resolve() if str(args.train_cfg).strip() else None
+    split_json_path = Path(args.split_json)
+
     out = {
-        "val": val_m,
-        "test": test_m,
+        "VAL": val_m,
+        "TEST": test_m,
+        "time_sec": float(time.time() - t0),
         "meta": {
             "dataset": dataset,
             "split_json": str(Path(args.split_json)),
+            "split_tag": str(args.split_tag),
+            "seed": int(args.seed),
             "ckpt": str(ckpt_path),
             "ckpt_key": str(args.ckpt_key),
             "label_offset": int(label_offset),
             "num_classes": int(num_classes),
             "patch_size": int(patch_size),
+            "dataset_cfg": str(Path(args.dataset_cfg)),
+            "model_cfg": str(Path(args.model_cfg)),
+            "dataset_cfg_sha1": _sha1_file(args.dataset_cfg),
+            "model_cfg_sha1": _sha1_file(args.model_cfg),
+            "train_cfg": str(train_cfg_path) if train_cfg_path is not None else "",
+            "train_cfg_sha1": _sha1_file(train_cfg_path) if train_cfg_path is not None else "",
+            "split_json_sha1": _sha1_file(split_json_path),
             "norm_path": str(norm_path) if norm_path.exists() else "computed_from_train",
-            "tta": False,
+            "num_params_total": num_params_total,
+            "num_params_trainable": num_params_trainable,
         },
     }
 
@@ -288,10 +248,10 @@ def main() -> None:
     save_json(out_p, out)
 
     print(
-        f"[eval] dataset={dataset} seed={args.seed} "
-        f"VAL(OA/AA/Kappa)={val_m['OA']:.4f}/{val_m['AA']:.4f}/{val_m['Kappa']:.4f} "
-        f"TEST(OA/AA/Kappa)={test_m['OA']:.4f}/{test_m['AA']:.4f}/{test_m['Kappa']:.4f} "
-        f"-> {out_p}"
+        f"[done] out={out_p} "
+        f"val_OA={val_m['OA']:.6f} val_AA={val_m['AA']:.6f} val_Kappa={val_m['Kappa']:.6f} "
+        f"test_OA={test_m['OA']:.6f} test_AA={test_m['AA']:.6f} test_Kappa={test_m['Kappa']:.6f} "
+        f"time_sec={out['time_sec']:.2f}"
     )
 
 

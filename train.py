@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Training entry point for TriScanMamba."""
+"""Training entry point for CenterTargetMamba."""
 
 from __future__ import annotations
 
 import argparse
-import copy
+import hashlib
 import json
 import math
 import random
@@ -15,7 +15,7 @@ from typing import Any, Dict
 
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -25,7 +25,7 @@ import yaml
 from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
 from utils.lr_schedulers import WarmupCosine
 from utils.engine import train_one_epoch, evaluate
-from models.triscan_mamba import VSSM3DConfig, VSSM3DModel
+from models.ctmamba import CTMambaConfig, CTMamba
 
 
 def _load_yaml(p: Path) -> Dict[str, Any]:
@@ -37,11 +37,24 @@ def _load_json(p: Path) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def _sha1_file(p: Path) -> str:
+    h = hashlib.sha1()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def _set_seed(seed: int, deterministic: bool = True) -> None:
+def _save_json(p: Path, obj: Dict[str, Any]) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _set_seed(seed: int, deterministic: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -97,21 +110,6 @@ def _fmt(x: Any, spec: str) -> str:
     return format(v, spec)
 
 
-def _make_balanced_sampler(gt: np.ndarray, indices: np.ndarray, *, label_offset: int, power: float) -> WeightedRandomSampler:
-    H, W = gt.shape
-    r = (indices // W).astype(np.int64)
-    c = (indices % W).astype(np.int64)
-    y = gt[r, c].astype(np.int64) - int(label_offset)
-    y = np.clip(y, 0, None)
-    n_cls = int(y.max()) + 1 if y.size else 1
-    counts = np.bincount(y, minlength=n_cls).astype(np.float64)
-    counts[counts <= 0] = 1.0
-    w_cls = 1.0 / np.power(counts, float(power))
-    weights = w_cls[y]
-    weights = torch.as_tensor(weights, dtype=torch.double)
-    return WeightedRandomSampler(weights=weights, num_samples=len(indices), replacement=True)
-
-
 def _maybe_scaler(enabled: bool):
     if not enabled:
         return None
@@ -157,17 +155,32 @@ def _build_model(
     if patch_size is not None:
         cfg_in["patch_size"] = int(patch_size)
 
-    allowed = set(getattr(VSSM3DConfig, "__annotations__", {}).keys())
-    cfg_in = {k: v for k, v in cfg_in.items() if k in allowed}
+    allowed = set(getattr(CTMambaConfig, "__annotations__", {}).keys())
+    unknown = sorted([k for k in cfg_in.keys() if k not in allowed])
+    if unknown:
+        raise ValueError(
+            f"Unknown model config keys: {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
+        )
 
-    cfg = VSSM3DConfig(**cfg_in)
-    model = VSSM3DModel(cfg).to(device)
+    cfg = CTMambaConfig(**cfg_in)
+    model = CTMamba(cfg).to(device)
     return model
 
 
 def _resolve_need_x_spec(train_cfg: Dict[str, Any], model_cfg: Dict[str, Any]) -> bool:
     _ = model_cfg
-    return bool(train_cfg.get("need_x_spec", False))
+    if bool(train_cfg.get("need_x_spec", False)):
+        print("[warn] train_cfg.need_x_spec=true is ignored: current model does not use x_spec.", flush=True)
+    return False
+
+
+def _resolve_num_classes(split: Dict[str, Any], dataset_cfg: Dict[str, Any], gt: np.ndarray, label_offset: int) -> int:
+    fallback = int(gt.max()) - int(label_offset) + 1
+    num_classes = int(split.get("num_classes", dataset_cfg.get("num_classes", fallback)))
+    if num_classes <= 0:
+        raise ValueError(f"num_classes must be > 0, got {num_classes}")
+    return int(num_classes)
 
 
 def main() -> None:
@@ -181,14 +194,21 @@ def main() -> None:
     ap.add_argument("--data_root", type=str, default="data")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--init_ckpt", type=str, default="", help="Optional pretrained checkpoint path.")
+    ap.add_argument("--init_ckpt_key", type=str, default="model", help="State-dict key for --init_ckpt.")
     args = ap.parse_args()
 
-    dataset_cfg = _load_yaml(Path(args.dataset_cfg))
-    model_cfg = _load_yaml(Path(args.model_cfg))
-    train_cfg = _load_yaml(Path(args.train_cfg))
-    split = _load_json(Path(args.split_json))
+    dataset_cfg_path = Path(args.dataset_cfg)
+    model_cfg_path = Path(args.model_cfg)
+    train_cfg_path = Path(args.train_cfg)
+    split_json_path = Path(args.split_json)
 
-    deterministic = bool(train_cfg.get("deterministic", True))
+    dataset_cfg = _load_yaml(dataset_cfg_path)
+    model_cfg = _load_yaml(model_cfg_path)
+    train_cfg = _load_yaml(train_cfg_path)
+    split = _load_json(split_json_path)
+
+    deterministic = bool(train_cfg.get("deterministic", False))
     _set_seed(int(args.seed), deterministic=deterministic)
 
     out_dir = Path(args.out_dir)
@@ -216,35 +236,70 @@ def main() -> None:
         raise ValueError(f"cube.npy shape {cube.shape} does not match gt shape {gt.shape}")
 
     raw_bands = int(cube.shape[-1])
-    append_coords = bool(model_cfg.get("append_coords", train_cfg.get("append_coords", False)))
 
     tr_indices = np.asarray(split["train_indices"], dtype=np.int64)
     va_indices = np.asarray(split["val_indices"], dtype=np.int64)
     te_indices = np.asarray(split["test_indices"], dtype=np.int64)
 
     label_offset = int(split.get("label_offset", dataset_cfg.get("label_offset", 1)))
-    num_classes = int(split.get("num_classes", dataset_cfg.get("num_classes", int(gt.max()))))
+    num_classes = _resolve_num_classes(split, dataset_cfg, gt, label_offset)
 
-    mean, std = compute_train_norm(cube, tr_indices)
+    dataset_cfg_sha1 = _sha1_file(dataset_cfg_path)
+    model_cfg_sha1 = _sha1_file(model_cfg_path)
+    train_cfg_sha1 = _sha1_file(train_cfg_path)
+    split_json_sha1 = _sha1_file(split_json_path)
+
+    norm_mean_global_blend = float(train_cfg.get("norm_mean_global_blend", 0.0))
+    norm_std_abs_floor = float(train_cfg.get("norm_std_abs_floor", 1.0e-3))
+    mean, std = compute_train_norm(
+        cube,
+        tr_indices,
+        mean_global_blend=norm_mean_global_blend,
+        std_abs_floor=norm_std_abs_floor,
+    )
     np.savez(out_dir / "meta" / "norm_stats.npz", mean=mean, std=std)
 
     patch_size = int(model_cfg.get("patch_size", 15))
     need_x_spec = _resolve_need_x_spec(train_cfg, model_cfg)
+
+    loss_type = str(train_cfg.get("loss_type", "ce")).strip().lower()
+    label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
+    focal_gamma = float(train_cfg.get("focal_gamma", 2.0))
+    logit_adjust_tau = float(train_cfg.get("logit_adjust_tau", 0.0))
+    class_weight_mode = str(train_cfg.get("class_weight_mode", "none")).strip().lower()
+    class_weight_beta = float(train_cfg.get("class_weight_beta", 0.999))
+
+    flat_gt = gt.reshape(-1).astype(np.int64)
+    tr_labels = flat_gt[tr_indices] - int(label_offset)
+    valid = (tr_labels >= 0) & (tr_labels < num_classes)
+    counts = np.bincount(tr_labels[valid], minlength=num_classes).astype(np.float64)
+    if float(counts.sum()) <= 0.0:
+        counts = np.ones((num_classes,), dtype=np.float64)
+    class_prior_np = counts / max(1.0, float(counts.sum()))
+
+    class_weights_np: np.ndarray | None
+    if class_weight_mode in ("inv", "inverse"):
+        class_weights_np = 1.0 / np.clip(counts, 1.0, None)
+    elif class_weight_mode in ("sqrt_inv", "sqrt_inverse"):
+        class_weights_np = 1.0 / np.sqrt(np.clip(counts, 1.0, None))
+    elif class_weight_mode in ("effective", "effective_num"):
+        beta = min(max(class_weight_beta, 0.0), 0.999999)
+        class_weights_np = (1.0 - beta) / (1.0 - np.power(beta, np.clip(counts, 1.0, None)))
+    else:
+        class_weights_np = None
+    if class_weights_np is not None:
+        class_weights_np = class_weights_np / np.maximum(class_weights_np.mean(), 1.0e-12)
 
     ds_train_kwargs = dict(
         cube=cube, gt=gt, indices=tr_indices, patch_size=patch_size, mean=mean, std=std,
         label_offset=label_offset,
         augment=bool(train_cfg.get("augment", False)),
         return_x_spec=need_x_spec,
-        append_coords=append_coords,
-        spec_dropout_p=float(train_cfg.get("spec_dropout_p", 0.0)),
-        spec_dropout_ratio=float(train_cfg.get("spec_dropout_ratio", 0.0)),
         noise_std=float(train_cfg.get("noise_std", 0.0)),
     )
     ds_eval_kwargs = dict(
         cube=cube, gt=gt, patch_size=patch_size, mean=mean, std=std, label_offset=label_offset, augment=False,
         return_x_spec=need_x_spec,
-        append_coords=append_coords,
     )
 
     ds_tr = HSIPatchDataset(**_filter_kwargs(HSIPatchDataset.__init__, ds_train_kwargs))
@@ -259,10 +314,6 @@ def main() -> None:
     persistent_workers = bool(num_workers > 0)
     eval_num_workers = max(0, int(train_cfg.get("eval_num_workers", min(num_workers, 4))))
     eval_prefetch_factor = int(train_cfg.get("eval_prefetch_factor", prefetch_factor))
-
-    balanced_sampler = bool(train_cfg.get("balanced_sampler", False))
-    balanced_power = float(train_cfg.get("balanced_power", 0.5))
-    sampler = _make_balanced_sampler(gt, tr_indices, label_offset=label_offset, power=balanced_power) if balanced_sampler else None
 
     dl_tr_common = dict(
         num_workers=num_workers,
@@ -281,7 +332,7 @@ def main() -> None:
         dl_eval_common["prefetch_factor"] = int(eval_prefetch_factor)
 
     dl_tr = DataLoader(
-        ds_tr, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler,
+        ds_tr, batch_size=batch_size, shuffle=True,
         drop_last=drop_last, **dl_tr_common
     )
     dl_va = DataLoader(ds_va, batch_size=eval_batch_size, shuffle=False, drop_last=False, **dl_eval_common)
@@ -290,7 +341,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = bool(args.amp and device.type == "cuda")
     scaler = _maybe_scaler(use_amp)
-    model_raw_bands = int(raw_bands + (2 if append_coords else 0))
+    model_raw_bands = int(raw_bands)
     model = _build_model(
         model_cfg,
         num_classes=num_classes,
@@ -298,37 +349,46 @@ def main() -> None:
         device=device,
         patch_size=patch_size,
     )
-    ema_decay = float(train_cfg.get("ema_decay", 0.0))
-    ema_start_epoch = int(train_cfg.get("ema_start_epoch", 0))
-    use_ema_eval = bool(train_cfg.get("use_ema_eval", True))
-    if ema_decay < 0.0:
-        ema_decay = 0.0
-    if ema_decay >= 1.0:
-        ema_decay = 0.9999
-    ema_model = None
-    if ema_decay > 0.0:
-        ema_model = copy.deepcopy(model).to(device)
-        ema_model.eval()
-        for p in ema_model.parameters():
-            p.requires_grad_(False)
-
-    def _ema_update(dst: torch.nn.Module, src: torch.nn.Module, decay: float) -> None:
-        with torch.no_grad():
-            d_params = dict(dst.named_parameters())
-            s_params = dict(src.named_parameters())
-            for n, dp in d_params.items():
-                sp = s_params[n]
-                dp.data.mul_(decay).add_(sp.data, alpha=1.0 - decay)
-            d_bufs = dict(dst.named_buffers())
-            s_bufs = dict(src.named_buffers())
-            for n, db in d_bufs.items():
-                db.data.copy_(s_bufs[n].data)
+    init_ckpt_path = Path(str(args.init_ckpt)).resolve() if str(args.init_ckpt).strip() else None
+    if init_ckpt_path is not None:
+        ck_init = _torch_load_compat(init_ckpt_path, map_location="cpu")
+        init_state = ck_init.get(str(args.init_ckpt_key), ck_init)
+        if not isinstance(init_state, dict):
+            raise ValueError(
+                f"--init_ckpt loaded object with unsupported type: {type(init_state)}; "
+                f"expected state_dict or dict containing key '{args.init_ckpt_key}'."
+            )
+        missing, unexpected = model.load_state_dict(init_state, strict=False)
+        print(
+            f"[init] ckpt={init_ckpt_path} key={args.init_ckpt_key} "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
+        if missing:
+            print(f"[init] missing_keys(sample): {missing[:8]}")
+        if unexpected:
+            print(f"[init] unexpected_keys(sample): {unexpected[:8]}")
+    class_prior_t = torch.from_numpy(class_prior_np.astype(np.float32)).to(device)
+    class_weights_t = (
+        torch.from_numpy(class_weights_np.astype(np.float32)).to(device)
+        if class_weights_np is not None
+        else None
+    )
+    num_params_total = int(sum(p.numel() for p in model.parameters()))
+    num_params_trainable = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     print(
-        f"[runtime] device={device} amp={use_amp} deterministic={deterministic} "
-        f"train_workers={num_workers} eval_workers={eval_num_workers} "
-        f"need_x_spec={need_x_spec} append_coords={append_coords} "
-        f"ema_decay={ema_decay:.6f} ema_start={ema_start_epoch}"
+        f"[run] mode=train model=CenterTargetMamba dataset={ds_name} seed={int(args.seed)} "
+        f"device={device.type} amp={use_amp} patch={patch_size} "
+        f"split={len(ds_tr)}/{len(ds_va)}/{len(ds_te)}(tr/val/te)"
+    )
+    print(
+        f"[run] workers={num_workers}/{eval_num_workers}(tr/ev) "
+        f"deterministic={deterministic} need_x_spec={need_x_spec}"
+    )
+    print(
+        f"[run] loss_type={loss_type} label_smoothing={label_smoothing:.4f} "
+        f"focal_gamma={focal_gamma:.3f} logit_adjust_tau={logit_adjust_tau:.3f} "
+        f"class_weight_mode={class_weight_mode}"
     )
 
     lr = float(train_cfg.get("lr", 1.1e-4))
@@ -346,50 +406,19 @@ def main() -> None:
 
     grad_accum_steps = int(train_cfg.get("grad_accum_steps", 1))
 
-    label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
-    conf_penalty = float(train_cfg.get("conf_penalty", 0.0))
     mixup_alpha = float(train_cfg.get("mixup_alpha", 0.0))
     mixup_prob = float(train_cfg.get("mixup_prob", 0.0))
 
-    pseudo_label_enable = bool(train_cfg.get("pseudo_label_enable", False))
-    pseudo_conf_thr = float(train_cfg.get("pseudo_conf_thr", 0.98))
-    pseudo_max_per_class = int(train_cfg.get("pseudo_max_per_class", 1500))
-    pseudo_epochs = int(train_cfg.get("pseudo_epochs", 0))
-    pseudo_lr_scale = float(train_cfg.get("pseudo_lr_scale", 0.2))
-    pseudo_mixup_alpha = float(train_cfg.get("pseudo_mixup_alpha", 0.0))
-    pseudo_mixup_prob = float(train_cfg.get("pseudo_mixup_prob", 0.0))
-    pseudo_spec_dropout_p = float(train_cfg.get("pseudo_spec_dropout_p", 0.0))
-    pseudo_spec_dropout_ratio = float(train_cfg.get("pseudo_spec_dropout_ratio", 0.0))
-
-    focal_gamma = float(train_cfg.get("focal_gamma", 0.0))
     aug_noise_std = float(train_cfg.get("aug_noise_std", 0.0))
-    # Keep main-experiment defaults fully enabled; use explicit overrides when needed.
-    device_spec_dropout_p = float(train_cfg.get("device_spec_dropout_p", train_cfg.get("spec_dropout_p", 0.0)))
-    device_spec_dropout_ratio = float(
-        train_cfg.get("device_spec_dropout_ratio", train_cfg.get("spec_dropout_ratio", 0.0))
-    )
-
-    early_stop = bool(train_cfg.get("early_stop", True))
-    patience = int(train_cfg.get("early_stop_patience", 70))
-    min_epochs = int(train_cfg.get("min_epochs", 85))
-    min_delta = float(train_cfg.get("early_stop_min_delta", 1.0e-4))
-    perfect_score_thr = float(train_cfg.get("perfect_score_thr", 1.1))
-    perfect_score_patience = int(train_cfg.get("perfect_score_patience", 0))
 
     select_metric = str(train_cfg.get("select_metric", "kappa")).lower()
-    smooth_k = int(train_cfg.get("val_smooth_k", 15))
-    eval_every = max(1, int(train_cfg.get("eval_every", 1)))
-    eval_on_first = bool(train_cfg.get("eval_on_first", True))
     final_eval_amp = bool(train_cfg.get("final_eval_amp", True)) and use_amp
     final_eval_num_workers = max(0, int(train_cfg.get("final_eval_num_workers", eval_num_workers)))
     final_eval_prefetch_factor = int(train_cfg.get("final_eval_prefetch_factor", eval_prefetch_factor))
     final_eval_log_interval = max(0, int(train_cfg.get("final_eval_log_interval", 25)))
 
     best_ep = -1
-    best_smooth = -1e18
-    no_improve = 0
-    perfect_hits = 0
-    hist = []
+    best_score = -1.0e18
 
     t0 = time.time()
     for ep in range(max_epochs):
@@ -401,34 +430,29 @@ def main() -> None:
             device=device,
             use_amp=use_amp, scaler=scaler, grad_clip=grad_clip,
             grad_accum_steps=grad_accum_steps,
-            label_smoothing=label_smoothing, conf_penalty=conf_penalty,
             mixup_alpha=mixup_alpha, mixup_prob=mixup_prob,
-            focal_gamma=focal_gamma,
             aug_noise_std=aug_noise_std,
             patch_size=patch_size,
-            spec_dropout_p=device_spec_dropout_p,
-            spec_dropout_ratio=device_spec_dropout_ratio,
             need_x_spec=need_x_spec,
+            loss_type=loss_type,
+            label_smoothing=label_smoothing,
+            focal_gamma=focal_gamma,
+            logit_adjust_tau=logit_adjust_tau,
+            class_prior=class_prior_t,
+            class_weights=class_weights_t,
         )
         loss_out = train_one_epoch(**_filter_kwargs(train_one_epoch, train_kwargs))
         loss = _unwrap_scalar(loss_out)
-
-        if ema_model is not None and ep >= ema_start_epoch:
-            _ema_update(ema_model, model, ema_decay)
 
         sched.step(ep)
         lr_now = float(optimizer.param_groups[0]["lr"])
 
         dt_ep = time.time() - ep_t0
         dt_total = time.time() - t0
-        do_eval = (ep == 0 and eval_on_first) or (((ep + 1) % eval_every) == 0) or (ep == (max_epochs - 1))
+        do_eval = True
         if do_eval:
-            eval_model = model
-            if ema_model is not None and use_ema_eval and ep >= ema_start_epoch:
-                eval_model = ema_model
-
             eval_kwargs = dict(
-                model=eval_model,
+                model=model,
                 dl=dl_va,
                 device=device,
                 num_classes=num_classes,
@@ -449,34 +473,17 @@ def main() -> None:
             else:
                 score = kp
 
-            hist.append(float(score))
-            k = max(1, smooth_k)
-            smooth = float(np.mean(hist[-k:]))
-            if float(score) >= float(perfect_score_thr):
-                perfect_hits += 1
-            else:
-                perfect_hits = 0
-
-            print(
-                f"[ep {ep:04d}] loss={_fmt(loss,'0.6f')} lr={lr_now:.2e} | "
-                f"VAL OA={_fmt(oa,'0.4f')} AA={_fmt(aa,'0.4f')} Kappa={_fmt(kp,'0.4f')} "
-                f"score={_fmt(score,'0.4f')} smooth{k}={_fmt(smooth,'0.4f')} "
-                f"time_ep={dt_ep:.2f}s total={dt_total:.1f}s"
-            )
-
-            improved = smooth > best_smooth + max(1.0e-12, float(min_delta))
+            improved = (best_ep < 0) or (float(score) > float(best_score))
             if improved:
-                best_smooth = smooth
+                best_score = float(score)
                 best_ep = ep
-                no_improve = 0
                 ckpt = {
                     "model": model.state_dict(),
-                    "ema_model": ema_model.state_dict() if ema_model is not None else None,
                     "optimizer": optimizer.state_dict(),
                     "opt": optimizer.state_dict(),
                     "sched": sched.state_dict(),
                     "epoch": int(ep),
-                    "best_smooth": float(best_smooth),
+                    "best_score": float(best_score),
                     "meta": {
                         "dataset": ds_name,
                         "split_json": str(Path(args.split_json)),
@@ -484,243 +491,25 @@ def main() -> None:
                         "num_classes": int(num_classes),
                         "patch_size": int(patch_size),
                         "norm_path": str(out_dir / "meta" / "norm_stats.npz"),
-                        "tta": False,
-                        "ema": bool(ema_model is not None and use_ema_eval and ep >= ema_start_epoch),
-                        "ema_decay": float(ema_decay),
                     },
                 }
                 torch.save(ckpt, out_dir / "checkpoints" / "best.pt")
-            else:
-                no_improve += 1
 
-            if (
-                do_eval
-                and early_stop
-                and ep >= min_epochs
-                and perfect_score_patience > 0
-                and perfect_hits >= perfect_score_patience
-            ):
-                print(
-                    f"[early_stop] reached score>={perfect_score_thr:.4f} for "
-                    f"{perfect_hits} evals (best_ep={best_ep})"
-                )
-                break
-        else:
             print(
-                f"[ep {ep:04d}] loss={_fmt(loss,'0.6f')} lr={lr_now:.2e} | "
-                f"VAL skipped (eval_every={eval_every}) time_ep={dt_ep:.2f}s total={dt_total:.1f}s"
+                f"[train][ep {ep + 1:03d}/{max_epochs:03d}] "
+                f"loss={_fmt(loss, '0.6f')} lr={lr_now:.2e} | "
+                f"val_OA={_fmt(oa, '0.4f')} val_AA={_fmt(aa, '0.4f')} val_Kappa={_fmt(kp, '0.4f')} | "
+                f"score={_fmt(score, '0.4f')} "
+                f"best={_fmt(best_score, '0.4f')}@{(best_ep + 1) if best_ep >= 0 else 0:03d} | "
+                f"t_ep={dt_ep:.2f}s t_total={dt_total:.1f}s"
             )
 
-        if do_eval and early_stop and ep >= min_epochs and no_improve >= patience:
-            print(f"[early_stop] no improve for {no_improve} epochs (best_ep={best_ep})")
-            break
-
-    if pseudo_label_enable and pseudo_epochs > 0:
-        ckpt_sup = _torch_load_compat(out_dir / "checkpoints" / "best.pt", map_location="cpu")
-        sup_key = "model"
-        if bool(use_ema_eval) and isinstance(ckpt_sup.get("ema_model", None), dict):
-            sup_key = "ema_model"
-        model.load_state_dict(ckpt_sup[sup_key])
-        model.to(device)
-        model.eval()
-
-        infer_workers = max(0, int(train_cfg.get("pseudo_num_workers", eval_num_workers)))
-        infer_prefetch = int(train_cfg.get("pseudo_prefetch_factor", eval_prefetch_factor))
-        dl_pseudo_kw = dict(
-            batch_size=eval_batch_size,
-            shuffle=False,
-            drop_last=False,
-            num_workers=infer_workers,
-            pin_memory=True,
-            persistent_workers=False,
-        )
-        if infer_workers > 0 and infer_prefetch > 0:
-            dl_pseudo_kw["prefetch_factor"] = int(infer_prefetch)
-        dl_pseudo = DataLoader(ds_te, **dl_pseudo_kw)
-
-        pred_list = []
-        conf_list = []
-        with torch.no_grad():
-            for batch in dl_pseudo:
-                x, x_spec, _ = batch
-                x = x.to(device, non_blocking=True)
-                if need_x_spec:
-                    x_spec = x_spec.to(device, non_blocking=True)
-                else:
-                    x_spec = None
-                with torch.autocast(device_type="cuda", enabled=use_amp):
-                    out = model(x, x_spec) if x_spec is not None else model(x)
-                prob = torch.softmax(out, dim=1)
-                conf, pred = torch.max(prob, dim=1)
-                pred_list.append(pred.detach().cpu().numpy().astype(np.int64, copy=False))
-                conf_list.append(conf.detach().cpu().numpy().astype(np.float32, copy=False))
-
-        if pred_list:
-            pred_all = np.concatenate(pred_list, axis=0)
-            conf_all = np.concatenate(conf_list, axis=0)
-        else:
-            pred_all = np.empty((0,), dtype=np.int64)
-            conf_all = np.empty((0,), dtype=np.float32)
-
-        picked_pos = []
-        if pred_all.size > 0:
-            for cls in range(num_classes):
-                m = (pred_all == cls) & (conf_all >= float(pseudo_conf_thr))
-                pos = np.where(m)[0]
-                if pos.size == 0:
-                    continue
-                ord_idx = np.argsort(-conf_all[pos])
-                keep = pos[ord_idx[: max(0, int(pseudo_max_per_class))]]
-                picked_pos.append(keep)
-        picked_pos = np.concatenate(picked_pos, axis=0).astype(np.int64, copy=False) if picked_pos else np.empty((0,), dtype=np.int64)
-
-        if picked_pos.size > 0:
-            pseudo_indices = te_indices[picked_pos]
-            pseudo_pred = pred_all[picked_pos]
-
-            pseudo_gt = np.asarray(gt, dtype=np.int64).copy()
-            rr = (pseudo_indices // W).astype(np.int64)
-            cc = (pseudo_indices % W).astype(np.int64)
-            pseudo_gt[rr, cc] = pseudo_pred + int(label_offset)
-
-            ds_ps = HSIPatchDataset(
-                **_filter_kwargs(
-                    HSIPatchDataset.__init__,
-                    dict(
-                        cube=cube,
-                        gt=pseudo_gt,
-                        indices=pseudo_indices,
-                        patch_size=patch_size,
-                        mean=mean,
-                        std=std,
-                        label_offset=label_offset,
-                        augment=True,
-                        return_x_spec=need_x_spec,
-                        spec_dropout_p=float(pseudo_spec_dropout_p),
-                        spec_dropout_ratio=float(pseudo_spec_dropout_ratio),
-                        noise_std=float(train_cfg.get("pseudo_noise_std", train_cfg.get("noise_std", 0.0))),
-                    ),
-                )
-            )
-
-            ds_mix = ConcatDataset([ds_tr, ds_ps])
-            dl_ps = DataLoader(
-                ds_mix,
-                batch_size=batch_size,
-                shuffle=True,
-                drop_last=drop_last,
-                **dl_tr_common,
-            )
-
-            lr_ps = float(max(min_lr, lr * max(1.0e-4, pseudo_lr_scale)))
-            opt_ps = torch.optim.AdamW(model.parameters(), lr=lr_ps, weight_decay=wd, betas=betas)
-
-            best_ps_score = -1.0e18
-            best_ps_state = None
-            print(
-                f"[pseudo] selected={int(picked_pos.size)} conf_thr={pseudo_conf_thr:.3f} "
-                f"max_per_class={pseudo_max_per_class} epochs={pseudo_epochs} lr={lr_ps:.2e}"
-            )
-            for pep in range(max(0, int(pseudo_epochs))):
-                loss_ps = train_one_epoch(
-                    **_filter_kwargs(
-                        train_one_epoch,
-                        dict(
-                            model=model,
-                            dl=dl_ps,
-                            optimizer=opt_ps,
-                            device=device,
-                            use_amp=use_amp,
-                            scaler=None,
-                            grad_clip=grad_clip,
-                            grad_accum_steps=grad_accum_steps,
-                            label_smoothing=label_smoothing,
-                            conf_penalty=conf_penalty,
-                            mixup_alpha=pseudo_mixup_alpha,
-                            mixup_prob=pseudo_mixup_prob,
-                            focal_gamma=focal_gamma,
-                            aug_noise_std=aug_noise_std,
-                            patch_size=patch_size,
-                            spec_dropout_p=pseudo_spec_dropout_p,
-                            spec_dropout_ratio=pseudo_spec_dropout_ratio,
-                            need_x_spec=need_x_spec,
-                        ),
-                    )
-                )
-                val_ps = evaluate(
-                    **_filter_kwargs(
-                        evaluate,
-                        dict(
-                            model=model,
-                            dl=dl_va,
-                            device=device,
-                            num_classes=num_classes,
-                            use_amp=use_amp,
-                            patch_size=patch_size,
-                            need_x_spec=need_x_spec,
-                        ),
-                    )
-                )
-                oa_ps = _get_metric(val_ps, "OA")
-                aa_ps = _get_metric(val_ps, "AA")
-                kp_ps = _get_metric(val_ps, "Kappa")
-                if select_metric == "oa":
-                    score_ps = oa_ps
-                elif select_metric == "aa":
-                    score_ps = aa_ps
-                else:
-                    score_ps = kp_ps
-                print(
-                    f"[pseudo ep {pep:03d}] loss={_fmt(loss_ps,'0.6f')} "
-                    f"VAL OA={_fmt(oa_ps,'0.4f')} AA={_fmt(aa_ps,'0.4f')} "
-                    f"Kappa={_fmt(kp_ps,'0.4f')} score={_fmt(score_ps,'0.4f')}"
-                )
-                if float(score_ps) > float(best_ps_score):
-                    best_ps_score = float(score_ps)
-                    best_ps_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-
-            if best_ps_state is not None:
-                model.load_state_dict(best_ps_state, strict=True)
-                torch.save(
-                    {
-                        "model": model.state_dict(),
-                        "ema_model": None,
-                        "optimizer": optimizer.state_dict(),
-                        "opt": optimizer.state_dict(),
-                        "sched": sched.state_dict(),
-                        "epoch": int(best_ep),
-                        "best_smooth": float(best_smooth),
-                        "meta": {
-                            "dataset": ds_name,
-                            "split_json": str(Path(args.split_json)),
-                            "label_offset": int(label_offset),
-                            "num_classes": int(num_classes),
-                            "patch_size": int(patch_size),
-                            "norm_path": str(out_dir / "meta" / "norm_stats.npz"),
-                            "tta": False,
-                            "ema": False,
-                            "pseudo_label_enable": True,
-                            "pseudo_selected": int(picked_pos.size),
-                            "pseudo_conf_thr": float(pseudo_conf_thr),
-                        },
-                    },
-                    out_dir / "checkpoints" / "best.pt",
-                )
-        else:
-            print(
-                f"[pseudo] no pseudo labels selected (conf_thr={pseudo_conf_thr:.3f}, "
-                f"max_per_class={pseudo_max_per_class}); skip pseudo fine-tune"
-            )
-
-    print("[final_eval] loading best checkpoint...")
+    print("[final] loading best checkpoint...")
     ckpt = _torch_load_compat(out_dir / "checkpoints" / "best.pt", map_location="cpu")
-    final_key = "model"
-    if bool(use_ema_eval) and isinstance(ckpt.get("ema_model", None), dict):
-        final_key = "ema_model"
-    model.load_state_dict(ckpt[final_key])
+    model.load_state_dict(ckpt["model"])
     model.to(device)
     model.eval()
-    print(f"[final_eval] using checkpoint weights: {final_key}")
+    print("[final] ckpt_key=model")
 
     dl_final_common = dict(
         num_workers=final_eval_num_workers,
@@ -729,60 +518,81 @@ def main() -> None:
     )
     if final_eval_num_workers > 0 and final_eval_prefetch_factor > 0:
         dl_final_common["prefetch_factor"] = int(final_eval_prefetch_factor)
-    dl_va_final = DataLoader(ds_va, batch_size=eval_batch_size, shuffle=False, drop_last=False, **dl_final_common)
-    dl_te_final = DataLoader(ds_te, batch_size=eval_batch_size, shuffle=False, drop_last=False, **dl_final_common)
 
-    print("[final_eval] evaluating VAL...")
-    print(
-        f"[final_eval] VAL samples={len(ds_va)} batch={eval_batch_size} "
-        f"workers={final_eval_num_workers} amp={final_eval_amp}"
+    dl_va_final = DataLoader(ds_va, batch_size=1024, shuffle=False, drop_last=False, **dl_final_common)
+    dl_te_final = DataLoader(ds_te, batch_size=1024, shuffle=False, drop_last=False, **dl_final_common)
+
+    eval_val_kwargs = dict(
+        model=model,
+        dl=dl_va_final,
+        device=device,
+        num_classes=num_classes,
+        use_amp=final_eval_amp,
+        patch_size=patch_size,
+        need_x_spec=need_x_spec,
+        log_prefix="final_val",
+        log_interval=final_eval_log_interval,
     )
-    val_best = evaluate(
-        **_filter_kwargs(
-            evaluate,
-            dict(
-                model=model,
-                dl=dl_va_final,
-                device=device,
-                num_classes=num_classes,
-                use_amp=final_eval_amp,
-                patch_size=patch_size,
-                log_prefix="final_val",
-                log_interval=final_eval_log_interval,
-                need_x_spec=need_x_spec,
-            ),
-        )
-    )
-    print("[final_eval] evaluating TEST...")
-    print(
-        f"[final_eval] TEST samples={len(ds_te)} batch={eval_batch_size} "
-        f"workers={final_eval_num_workers} amp={final_eval_amp}"
-    )
-    te_best = evaluate(
-        **_filter_kwargs(
-            evaluate,
-            dict(
-                model=model,
-                dl=dl_te_final,
-                device=device,
-                num_classes=num_classes,
-                use_amp=final_eval_amp,
-                patch_size=patch_size,
-                log_prefix="final_test",
-                log_interval=final_eval_log_interval,
-                need_x_spec=need_x_spec,
-            ),
-        )
+    eval_test_kwargs = dict(
+        model=model,
+        dl=dl_te_final,
+        device=device,
+        num_classes=num_classes,
+        use_amp=final_eval_amp,
+        patch_size=patch_size,
+        need_x_spec=need_x_spec,
+        log_prefix="final_test",
+        log_interval=final_eval_log_interval,
     )
 
-    result = {
-        "best_ep": int(best_ep),
-        "VAL": val_best,
-        "TEST": te_best,
-        "time_sec": float(time.time() - t0),
+    print(
+        f"[final][VAL] samples={len(ds_va)} batch=1024 workers={final_eval_num_workers} amp={final_eval_amp}"
+    )
+    val_metrics = evaluate(**_filter_kwargs(evaluate, eval_val_kwargs))
+    print(
+        f"[final][TEST] samples={len(ds_te)} batch=1024 workers={final_eval_num_workers} amp={final_eval_amp}"
+    )
+    test_metrics = evaluate(**_filter_kwargs(evaluate, eval_test_kwargs))
+
+    time_sec = float(time.time() - t0)
+
+    final_out = {
+        "best_ep": int(best_ep + 1),
+        "VAL": val_metrics,
+        "TEST": test_metrics,
+        "time_sec": time_sec,
+        "meta": {
+            "dataset": ds_name,
+            "split_json": str(split_json_path),
+            "seed": int(args.seed),
+            "label_offset": int(label_offset),
+            "num_classes": int(num_classes),
+            "patch_size": int(patch_size),
+            "dataset_cfg": str(dataset_cfg_path),
+            "model_cfg": str(model_cfg_path),
+            "train_cfg": str(train_cfg_path),
+            "dataset_cfg_sha1": dataset_cfg_sha1,
+            "model_cfg_sha1": model_cfg_sha1,
+            "train_cfg_sha1": train_cfg_sha1,
+            "split_json_sha1": split_json_sha1,
+            "norm_path": str(out_dir / "meta" / "norm_stats.npz"),
+            "tta": False,
+            "num_params_total": int(num_params_total),
+            "num_params_trainable": int(num_params_trainable),
+        },
     }
-    (out_dir / "metrics.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[done] out_dir={out_dir} best_ep={best_ep} ckpt=best VAL={val_best} TEST={te_best} time={result['time_sec']:.1f}s")
+    _save_json(out_dir / "metrics.json", final_out)
+
+    print(
+        f"[done] out_dir={out_dir} best_ep={best_ep + 1} ckpt_key=model "
+        f"val_OA={_fmt(val_metrics.get('OA', float('nan')), '0.6f')} "
+        f"val_AA={_fmt(val_metrics.get('AA', float('nan')), '0.6f')} "
+        f"val_Kappa={_fmt(val_metrics.get('Kappa', float('nan')), '0.6f')} "
+        f"test_OA={_fmt(test_metrics.get('OA', float('nan')), '0.6f')} "
+        f"test_AA={_fmt(test_metrics.get('AA', float('nan')), '0.6f')} "
+        f"test_Kappa={_fmt(test_metrics.get('Kappa', float('nan')), '0.6f')} "
+        f"time_sec={time_sec:.2f}"
+    )
 
 
 if __name__ == "__main__":

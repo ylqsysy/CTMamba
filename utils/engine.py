@@ -65,17 +65,6 @@ def _find_patch_spatial_dims(x: torch.Tensor, patch_size: int = 15) -> Tuple[int
     return x.ndim - 2, x.ndim - 1
 
 
-def _find_spectral_dim(x: torch.Tensor, patch_size: int = 15) -> int:
-    spatial = set(_find_patch_spatial_dims(x, patch_size))
-    cand = []
-    for i in range(1, x.ndim):
-        if i in spatial:
-            continue
-        cand.append((int(x.shape[i]), i))
-    cand.sort(reverse=True)
-    return cand[0][1] if cand else 1
-
-
 def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[torch.Tensor]:
     if not torch.is_tensor(x):
         return None
@@ -111,24 +100,6 @@ def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[tor
     return None
 
 
-def _apply_spec_dropout(x: torch.Tensor, p: float, ratio: float, patch_size: int = 15) -> torch.Tensor:
-    if p <= 0.0 or ratio <= 0.0:
-        return x
-    if torch.rand((), device=x.device).item() > p:
-        return x
-    sd = _find_spectral_dim(x, patch_size)
-    n_bands = int(x.shape[sd])
-    if n_bands <= 1:
-        return x
-    width = max(1, int(round(n_bands * ratio)))
-    start = int(torch.randint(0, max(1, n_bands - width + 1), (), device=x.device).item())
-    slc = [slice(None)] * x.ndim
-    slc[sd] = slice(start, start + width)
-    out = x.clone()
-    out[tuple(slc)] = 0.0
-    return out
-
-
 def _mixup(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -150,14 +121,39 @@ def _mixup(
     return x_mix, x_spec_mix, y, y2, lam
 
 
-def _ce_loss(logits: torch.Tensor, y: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
-    return F.cross_entropy(logits, y, label_smoothing=float(label_smoothing))
+def _ce_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    class_weights: Optional[torch.Tensor] = None,
+    label_smoothing: float = 0.0,
+) -> torch.Tensor:
+    return F.cross_entropy(
+        logits,
+        y,
+        weight=class_weights,
+        label_smoothing=float(max(0.0, label_smoothing)),
+    )
 
 
-def _focal_loss(logits: torch.Tensor, y: torch.Tensor, gamma: float, label_smoothing: float = 0.0) -> torch.Tensor:
-    ce = F.cross_entropy(logits, y, reduction="none", label_smoothing=float(label_smoothing))
-    pt = torch.exp(-ce)
-    loss = ((1.0 - pt) ** float(gamma)) * ce
+def _focal_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    gamma: float = 2.0,
+    class_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    gamma = float(max(0.0, gamma))
+    log_prob = F.log_softmax(logits, dim=1)
+    prob = log_prob.exp()
+    y = y.long()
+    pt = prob.gather(dim=1, index=y.unsqueeze(1)).squeeze(1).clamp_min(1.0e-8)
+    log_pt = torch.log(pt)
+    focal_factor = (1.0 - pt).pow(gamma)
+    loss = -focal_factor * log_pt
+    if class_weights is not None:
+        w = class_weights[y]
+        loss = loss * w
     return loss.mean()
 
 
@@ -218,17 +214,18 @@ def train_one_epoch(
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     use_amp: bool = False,
     grad_clip: float = 0.0,
-    label_smoothing: float = 0.0,
-    conf_penalty: float = 0.0,
-    focal_gamma: float = 0.0,
     mixup_prob: float = 0.0,
     mixup_alpha: float = 0.0,
-    spec_dropout_p: float = 0.0,
-    spec_dropout_ratio: float = 0.0,
     aug_noise_std: float = 0.0,
     patch_size: int = 15,
     grad_accum_steps: int = 1,
     need_x_spec: bool = True,
+    loss_type: str = "ce",
+    label_smoothing: float = 0.0,
+    focal_gamma: float = 2.0,
+    logit_adjust_tau: float = 0.0,
+    class_prior: Optional[torch.Tensor] = None,
+    class_weights: Optional[torch.Tensor] = None,
 ) -> float:
     model.train()
     if scaler is None:
@@ -239,6 +236,16 @@ def train_one_epoch(
     optimizer.zero_grad(set_to_none=True)
 
     steps_done = 0
+    loss_type = str(loss_type).strip().lower()
+    label_smoothing = float(max(0.0, label_smoothing))
+    focal_gamma = float(max(0.0, focal_gamma))
+    logit_adjust_tau = float(max(0.0, logit_adjust_tau))
+
+    if class_prior is not None:
+        class_prior = class_prior.to(device=device, dtype=torch.float32)
+    if class_weights is not None:
+        class_weights = class_weights.to(device=device, dtype=torch.float32)
+
     for batch in dl:
 
         x, x_spec, y = _as_x_xspec_y(batch)
@@ -254,7 +261,6 @@ def train_one_epoch(
             if x_spec is not None:
                 x_spec = x_spec + torch.randn_like(x_spec) * float(aug_noise_std)
 
-        x = _apply_spec_dropout(x, float(spec_dropout_p), float(spec_dropout_ratio), patch_size=patch_size)
         if bool(need_x_spec) and x_spec is None:
             x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)
 
@@ -273,25 +279,42 @@ def train_one_epoch(
                 derive_x_spec=bool(need_x_spec),
             )
 
-            if focal_gamma and float(focal_gamma) > 0.0:
-                loss_a = _focal_loss(logits, y_a, float(focal_gamma), label_smoothing=label_smoothing)
-                if lam < 1.0:
-                    loss_b = _focal_loss(logits, y_b, float(focal_gamma), label_smoothing=label_smoothing)
-                    loss = lam * loss_a + (1.0 - lam) * loss_b
-                else:
-                    loss = loss_a
-            else:
-                loss_a = _ce_loss(logits, y_a, label_smoothing=label_smoothing)
-                if lam < 1.0:
-                    loss_b = _ce_loss(logits, y_b, label_smoothing=label_smoothing)
-                    loss = lam * loss_a + (1.0 - lam) * loss_b
-                else:
-                    loss = loss_a
+            logits_loss = logits
+            if class_prior is not None and logit_adjust_tau > 0.0:
+                logits_loss = logits_loss + logit_adjust_tau * torch.log(class_prior.clamp_min(1.0e-12))[None, :]
 
-            if conf_penalty and float(conf_penalty) > 0.0:
-                p = torch.softmax(logits, dim=1)
-                neg_entropy = (p * torch.log(p.clamp_min(1e-8))).sum(dim=1).mean()
-                loss = loss + float(conf_penalty) * neg_entropy
+            if loss_type == "focal":
+                loss_a = _focal_loss(
+                    logits_loss,
+                    y_a,
+                    gamma=focal_gamma,
+                    class_weights=class_weights,
+                )
+            else:
+                loss_a = _ce_loss(
+                    logits_loss,
+                    y_a,
+                    class_weights=class_weights,
+                    label_smoothing=label_smoothing,
+                )
+            if lam < 1.0:
+                if loss_type == "focal":
+                    loss_b = _focal_loss(
+                        logits_loss,
+                        y_b,
+                        gamma=focal_gamma,
+                        class_weights=class_weights,
+                    )
+                else:
+                    loss_b = _ce_loss(
+                        logits_loss,
+                        y_b,
+                        class_weights=class_weights,
+                        label_smoothing=label_smoothing,
+                    )
+                loss = lam * loss_a + (1.0 - lam) * loss_b
+            else:
+                loss = loss_a
 
             loss = loss / float(grad_accum_steps)
 
