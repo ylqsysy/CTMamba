@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import yaml
 
 from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
+from utils.hsi_preprocess import fit_and_apply_spectral_preprocess
 from utils.lr_schedulers import WarmupCosine
 from utils.engine import train_one_epoch, evaluate
 from models.ctmamba import CTMambaConfig, CTMamba
@@ -235,11 +236,29 @@ def main() -> None:
     else:
         raise ValueError(f"cube.npy shape {cube.shape} does not match gt shape {gt.shape}")
 
-    raw_bands = int(cube.shape[-1])
-
     tr_indices = np.asarray(split["train_indices"], dtype=np.int64)
     va_indices = np.asarray(split["val_indices"], dtype=np.int64)
     te_indices = np.asarray(split["test_indices"], dtype=np.int64)
+
+    spectral_preprocess_path = out_dir / "meta" / "spectral_preprocess.npz"
+    cube, spectral_state = fit_and_apply_spectral_preprocess(
+        cube,
+        tr_indices,
+        train_cfg,
+        gt_shape=(H, W),
+        save_path=spectral_preprocess_path,
+    )
+    raw_bands = int(cube.shape[-1])
+    if str(spectral_state.get("mode", "none")) != "none":
+        extra = ""
+        evr = np.asarray(spectral_state.get("explained_variance_ratio", []), dtype=np.float32).reshape(-1)
+        if evr.size > 0:
+            extra = f" explained_var_sum={float(evr.sum()):.4f}"
+        print(
+            f"[run] spectral_preprocess={spectral_state.get('mode')} "
+            f"{int(spectral_state.get('raw_bands', raw_bands))}->{int(spectral_state.get('out_bands', raw_bands))}"
+            f"{extra}"
+        )
 
     label_offset = int(split.get("label_offset", dataset_cfg.get("label_offset", 1)))
     num_classes = _resolve_num_classes(split, dataset_cfg, gt, label_offset)
@@ -416,6 +435,7 @@ def main() -> None:
     final_eval_num_workers = max(0, int(train_cfg.get("final_eval_num_workers", eval_num_workers)))
     final_eval_prefetch_factor = int(train_cfg.get("final_eval_prefetch_factor", eval_prefetch_factor))
     final_eval_log_interval = max(0, int(train_cfg.get("final_eval_log_interval", 25)))
+    final_eval_batch_size = max(1, int(train_cfg.get("final_eval_batch_size", 1024)))
 
     best_ep = -1
     best_score = -1.0e18
@@ -491,6 +511,7 @@ def main() -> None:
                         "num_classes": int(num_classes),
                         "patch_size": int(patch_size),
                         "norm_path": str(out_dir / "meta" / "norm_stats.npz"),
+                        "spectral_preprocess_path": str(spectral_preprocess_path),
                     },
                 }
                 torch.save(ckpt, out_dir / "checkpoints" / "best.pt")
@@ -519,8 +540,8 @@ def main() -> None:
     if final_eval_num_workers > 0 and final_eval_prefetch_factor > 0:
         dl_final_common["prefetch_factor"] = int(final_eval_prefetch_factor)
 
-    dl_va_final = DataLoader(ds_va, batch_size=1024, shuffle=False, drop_last=False, **dl_final_common)
-    dl_te_final = DataLoader(ds_te, batch_size=1024, shuffle=False, drop_last=False, **dl_final_common)
+    dl_va_final = DataLoader(ds_va, batch_size=final_eval_batch_size, shuffle=False, drop_last=False, **dl_final_common)
+    dl_te_final = DataLoader(ds_te, batch_size=final_eval_batch_size, shuffle=False, drop_last=False, **dl_final_common)
 
     eval_val_kwargs = dict(
         model=model,
@@ -546,11 +567,11 @@ def main() -> None:
     )
 
     print(
-        f"[final][VAL] samples={len(ds_va)} batch=1024 workers={final_eval_num_workers} amp={final_eval_amp}"
+        f"[final][VAL] samples={len(ds_va)} batch={final_eval_batch_size} workers={final_eval_num_workers} amp={final_eval_amp}"
     )
     val_metrics = evaluate(**_filter_kwargs(evaluate, eval_val_kwargs))
     print(
-        f"[final][TEST] samples={len(ds_te)} batch=1024 workers={final_eval_num_workers} amp={final_eval_amp}"
+        f"[final][TEST] samples={len(ds_te)} batch={final_eval_batch_size} workers={final_eval_num_workers} amp={final_eval_amp}"
     )
     test_metrics = evaluate(**_filter_kwargs(evaluate, eval_test_kwargs))
 
@@ -576,6 +597,10 @@ def main() -> None:
             "train_cfg_sha1": train_cfg_sha1,
             "split_json_sha1": split_json_sha1,
             "norm_path": str(out_dir / "meta" / "norm_stats.npz"),
+            "spectral_preprocess_path": str(spectral_preprocess_path) if spectral_preprocess_path.exists() else "",
+            "spectral_preprocess_mode": str(spectral_state.get("mode", "none")),
+            "spectral_raw_bands": int(spectral_state.get("raw_bands", raw_bands)),
+            "spectral_out_bands": int(spectral_state.get("out_bands", raw_bands)),
             "tta": False,
             "num_params_total": int(num_params_total),
             "num_params_trainable": int(num_params_trainable),

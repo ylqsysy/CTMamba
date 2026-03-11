@@ -2,7 +2,7 @@
 """Evaluate a trained checkpoint on validation and test splits.
 
 This entry point intentionally performs a single deterministic forward pass
-without any test-time augmentation so that metrics are directly comparable
+without test-time augmentation so that metrics are directly comparable
 across repeated runs.
 """
 
@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from utils.io import load_yaml, load_json, ensure_dir, save_json
 from utils.seed import set_global_seed
 from utils.hsi_dataset import HSIPatchDataset, compute_train_norm
+from utils.hsi_preprocess import fit_and_apply_spectral_preprocess, load_spectral_preprocess, apply_spectral_preprocess
 from utils.engine import evaluate as engine_evaluate
 from models import CTMambaConfig, CTMambaModel
 
@@ -132,9 +133,22 @@ def main() -> None:
     te_idx = np.asarray(split.get("test_indices", split.get("test", [])), dtype=np.int64)
 
     patch_size = int(mcfg.get("patch_size", dcfg.get("patch_size", 15)))
-
     ckpt_path = Path(args.ckpt)
     out_dir = ckpt_path.parent.parent
+    spectral_preprocess_path = out_dir / "meta" / "spectral_preprocess.npz"
+    spectral_state: Dict[str, Any]
+    if spectral_preprocess_path.exists():
+        spectral_state = load_spectral_preprocess(spectral_preprocess_path)
+        cube = apply_spectral_preprocess(cube, spectral_state)
+    else:
+        cube, spectral_state = fit_and_apply_spectral_preprocess(
+            cube,
+            tr_idx,
+            load_yaml(args.train_cfg) if str(args.train_cfg).strip() else {},
+            gt_shape=gt.shape,
+            save_path=None,
+        )
+
     norm_path = out_dir / "meta" / "norm_stats.npz"
     if norm_path.exists():
         z = np.load(norm_path)
@@ -238,6 +252,10 @@ def main() -> None:
             "train_cfg_sha1": _sha1_file(train_cfg_path) if train_cfg_path is not None else "",
             "split_json_sha1": _sha1_file(split_json_path),
             "norm_path": str(norm_path) if norm_path.exists() else "computed_from_train",
+            "spectral_preprocess_path": str(spectral_preprocess_path) if spectral_preprocess_path.exists() else "",
+            "spectral_preprocess_mode": str(spectral_state.get("mode", "none")),
+            "spectral_raw_bands": int(spectral_state.get("raw_bands", cube.shape[-1])),
+            "spectral_out_bands": int(spectral_state.get("out_bands", cube.shape[-1])),
             "num_params_total": num_params_total,
             "num_params_trainable": num_params_trainable,
         },
