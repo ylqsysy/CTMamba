@@ -1,83 +1,39 @@
-# CenterTargetMamba (CTMamba)
+# CenterTargetMamba
 
-PyTorch code for hyperspectral image classification with a fixed CTMamba architecture.
+PyTorch implementation of CenterTargetMamba for hyperspectral image classification.
 
-## Model Definition
-
-CTMamba uses a fixed front-end, backbone, and back-end:
-
-- Front-end: `1x1` spectral projection (`conv1x1`)
-- Backbone: raster-route spatial selective scan blocks
-- Back-end: MLP classifier head input feature fusion
-- Structured adapters: `CCA + CPA + BCA + RSA`
-
-Main model file:
-
-- `models/ctmamba.py`
-
-## Install
+## Requirements
 
 ```bash
 pip install numpy scipy pyyaml torch h5py scikit-learn tqdm joblib
 ```
 
-## Minimal Workflow
-
-1. Convert raw `.mat` to `cube.npy` and `gt.npy`.
-2. Generate split JSON files.
-3. Train.
-4. Evaluate.
-
-Scripts:
-
-- `prepare_raw_to_processed.py`
-- `make_splits.py`
-- `train.py`
-- `eval.py`
-- `run_multiseed.py`
-
-Help for each script:
+## Data Preparation
 
 ```bash
-python <script>.py --help
+python prepare_raw_to_processed.py --help
+python make_splits.py --help
 ```
 
-## Example
-
-Run one seed on Pavia University:
+## Training
 
 ```bash
 python run_multiseed.py \
   --dataset pavia_university \
   --split_tag random \
-  --seeds 0 \
-  --amp \
+  --seeds 0-2 \
   --data_root data \
-  --out_base outputs/checkpoints
+  --out_base outputs/checkpoints \
+  --amp
 ```
 
-## Main Configs
+Released configs are stored in `configs/datasets`, `configs/model`, and `configs/train`.
 
-- Model: `configs/model/ctmamba_pavia_university.yaml`
-- Train: `configs/train/pu.yaml`
-- Dataset: `configs/datasets/pavia_university.yaml`
+## Evaluation
 
-All released CTMamba configs currently use `patch_size=15`.
-
-## Output Schema
-
-Single-seed `metrics.json` includes:
-
-- `VAL` / `TEST`: OA, AA, Kappa (and optional class-wise outputs)
-- `time_sec`
-- `meta`: dataset/split/seed/config hashes/parameter counts
-
-Multi-seed `mean_metrics.json` includes:
-
-- `per_seed` and `per_seed_full`
-- `mean` / `std`
-- optional runtime and parameter summaries
+Each seed writes `metrics.json` under `outputs/checkpoints/<dataset>_seed*/`.
+The multi-seed summary is written to `outputs/checkpoints/<dataset>_mean3/mean_metrics.json`.
 
 ## License
 
-MIT License.
+MIT

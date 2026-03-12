@@ -7,17 +7,9 @@ from typing import Any, Dict, List, Optional
 
 
 class WarmupCosine:
-    """Warmup + Cosine decay LR scheduler (epoch-based).
+    """Epoch-based warmup and cosine decay scheduler.
 
-    This is intentionally lightweight and does not depend on torch internals.
-
-    Supported calling patterns:
-      1) WarmupCosine(optimizer, max_epochs=..., warmup_epochs=..., min_lr=..., base_lr=None)
-         - If base_lr is None, uses each param_group's current 'lr' as its base.
-         - Keeps per-group LR ratios.
-
-      2) Legacy: WarmupCosine(base_lr_float, warmup_epochs, max_epochs, min_lr)
-         - No optimizer is attached; call .get_lr(epoch) to query a scalar LR.
+    The scheduler can wrap an optimizer or operate in scalar mode.
     """
 
     def __init__(
@@ -72,11 +64,11 @@ class WarmupCosine:
         return float(min_lr + (base_lr - min_lr) * cos)
 
     def get_lr(self, epoch: int) -> float:
-        """Return scalar LR for legacy usage."""
+        """Return the learning rate for a given epoch in scalar mode."""
         return self._lr_at(int(epoch), float(self.base_lrs[0]), float(self.min_lrs[0]))
 
     def step(self, epoch: int) -> List[float]:
-        """Set optimizer LRs for a given epoch. Returns the list of LRs."""
+        """Update optimizer learning rates for a given epoch."""
         if self.optimizer is None:
             return [self.get_lr(epoch)]
 

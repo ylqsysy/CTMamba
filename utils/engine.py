@@ -10,13 +10,7 @@ import torch.nn.functional as F
 
 
 def _as_x_xspec_y(batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-    """
-    Accept:
-      (x, y)
-      (x, x_spec, y, ...)
-      (x, y, x_spec, ...)
-      {"x":..., "y":..., "x_spec":...} (or "spec")
-    """
+    """Normalize a supported batch layout to `(x, x_spec, y)`."""
     if isinstance(batch, dict):
         x = batch.get("x", None)
         y = batch.get("y", None)
@@ -226,6 +220,7 @@ def train_one_epoch(
     logit_adjust_tau: float = 0.0,
     class_prior: Optional[torch.Tensor] = None,
     class_weights: Optional[torch.Tensor] = None,
+    spectral_dropout: float = 0.0,
 ) -> float:
     model.train()
     if scaler is None:
@@ -240,6 +235,7 @@ def train_one_epoch(
     label_smoothing = float(max(0.0, label_smoothing))
     focal_gamma = float(max(0.0, focal_gamma))
     logit_adjust_tau = float(max(0.0, logit_adjust_tau))
+    spectral_dropout = float(max(0.0, spectral_dropout))
 
     if class_prior is not None:
         class_prior = class_prior.to(device=device, dtype=torch.float32)
@@ -260,6 +256,11 @@ def train_one_epoch(
             x = x + torch.randn_like(x) * float(aug_noise_std)
             if x_spec is not None:
                 x_spec = x_spec + torch.randn_like(x_spec) * float(aug_noise_std)
+
+        if spectral_dropout > 0.0:
+            x = F.dropout2d(x, p=spectral_dropout, training=True)
+            if bool(need_x_spec):
+                x_spec = None
 
         if bool(need_x_spec) and x_spec is None:
             x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)

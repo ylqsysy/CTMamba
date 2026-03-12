@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run multi-seed training/evaluation and summarize metrics."""
+"""Run multi-seed training, evaluation, and metric aggregation."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def _parse_seeds(spec: str) -> List[int]:
 
 
 def _pick_split_dict(d: Dict[str, Any], split: str) -> Dict[str, Any]:
-    """Read split metrics from flexible JSON layouts."""
+    """Read split metrics from the supported JSON layouts."""
     if not isinstance(d, dict):
         raise KeyError(f"metrics root is not a dict: {type(d)}")
 

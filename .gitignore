@@ -1,0 +1,29 @@
+# IDEs and Editors
+.vscode/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+hsi3d.egg-info/
+.eggs/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Experiment assets
+/outputs/
+/data/
+/external/baselines/
+/configs/
+/splits/
+
+# Local helper scripts
+/scripts/
+
+# Large intermediate / cache files
+*.mat
+*.npy

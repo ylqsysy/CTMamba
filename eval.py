@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a trained checkpoint on validation and test splits.
-
-This entry point intentionally performs a single deterministic forward pass
-without test-time augmentation so that metrics are directly comparable
-across repeated runs.
-"""
+"""Evaluate a checkpoint on the validation and test splits."""
 
 from __future__ import annotations
 
@@ -116,6 +111,7 @@ def main() -> None:
     dcfg = load_yaml(args.dataset_cfg)
     mcfg = load_yaml(args.model_cfg)
     split = load_json(args.split_json)
+    train_cfg = load_yaml(args.train_cfg) if str(args.train_cfg).strip() else {}
 
     dataset = str(dcfg.get("dataset", split.get("dataset", ""))).strip()
     if not dataset:
@@ -144,7 +140,7 @@ def main() -> None:
         cube, spectral_state = fit_and_apply_spectral_preprocess(
             cube,
             tr_idx,
-            load_yaml(args.train_cfg) if str(args.train_cfg).strip() else {},
+            train_cfg,
             gt_shape=gt.shape,
             save_path=None,
         )
@@ -155,7 +151,13 @@ def main() -> None:
         mean = z["mean"].astype(np.float32)
         std = z["std"].astype(np.float32)
     else:
-        mean, std = compute_train_norm(cube, tr_idx)
+        mean, std = compute_train_norm(
+            cube,
+            tr_idx,
+            mean_global_blend=float(train_cfg.get("norm_mean_global_blend", 0.0)),
+            std_global_ratio=float(train_cfg.get("norm_std_global_ratio", 0.0)),
+            std_abs_floor=float(train_cfg.get("norm_std_abs_floor", 1.0e-3)),
+        )
 
     common = {
         "cube": cube,
@@ -166,6 +168,7 @@ def main() -> None:
         "std": std,
         "augment": False,
         "return_x_spec": False,
+        "pad_mode": str(train_cfg.get("pad_mode", "edge")),
     }
 
     def make_ds(indices: np.ndarray):

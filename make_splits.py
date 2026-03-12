@@ -39,14 +39,7 @@ def _parse_seeds(s: str) -> List[int]:
 
 
 def _base_keeps(nc: int) -> Tuple[int, int, int]:
-    """
-    Per-class minimum keep counts for small/imbalanced classes.
-    Piecewise floors:
-      nc >= 20: (10,5,5)
-      nc >= 12: (5,3,3)
-      nc >=  6: (2,2,2)
-      else:    (1,1, max(0,nc-2))
-    """
+    """Return conservative per-class floors for train, val, and test."""
     nc = int(nc)
     if nc >= 20:
         return 10, 5, 5
@@ -70,10 +63,7 @@ def _fit_keeps(
     lb_test: int,
     relax_order: Tuple[str, str, str] = ("train", "val", "test"),
 ) -> Tuple[int, int, int]:
-    """
-    Fit (kt,kv,ktest) into nc, while trying NOT to go below lower bounds (lb_*).
-    If even sum(lb_*) > nc, then we allow going below lb_* as a last resort.
-    """
+    """Fit the requested split counts into the available class size."""
     nc = int(nc)
     kt = max(0, int(kt))
     kv = max(0, int(kv))
@@ -143,10 +133,7 @@ def _fit_keeps(
 
 
 def _load_mat_any(path: str) -> Dict[str, np.ndarray]:
-    """
-    Load .mat (v7.3 via h5py; older via scipy.io.loadmat).
-    Return dict name->ndarray for all datasets/variables.
-    """
+    """Load a MATLAB file with `h5py` or `scipy.io.loadmat`."""
     p = str(path)
 
     if h5py is not None:
@@ -173,10 +160,7 @@ def _load_mat_any(path: str) -> Dict[str, np.ndarray]:
 
 
 def _pick_key_from_index(keys: List[str], kind: str) -> str:
-    """
-    Auto pick train/test key from index.mat keys.
-    kind: 'train' or 'test'
-    """
+    """Select the most likely train or test key from an index file."""
     kind = kind.lower()
 
     def score(k: str) -> int:
@@ -207,14 +191,7 @@ def _pick_key_from_index(keys: List[str], kind: str) -> str:
 
 
 def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
-    """
-    Convert possible representations to 0-based linear indices in [0, H*W).
-    Supported:
-      - mask/label image of shape (H,W): arr>0 -> indices
-      - linear indices: shape (N,) or (1,N) or (N,1)
-      - row/col pairs: shape (2,N) or (N,2)
-    Handles 1-based (MATLAB) or 0-based automatically.
-    """
+    """Convert masks, linear indices, or row-column pairs to flat indices."""
     a = np.asarray(arr).squeeze()
 
     if a.ndim == 2 and a.shape == (H, W):
@@ -278,31 +255,6 @@ def _to_linear_indices(arr: np.ndarray, H: int, W: int) -> np.ndarray:
     return np.unique(a).astype(np.int64)
 
 
-def _make_fixed_index_split(
-    gt_flat: np.ndarray,
-    classes: List[int],
-    index_mat_path: str,
-    seed: int,
-    train_key: str = "",
-    test_key: str = "",
-    fixed_val_per_class: int = -1,
-    val_ratio: float = 0.1,
-    min_train_keep_per_class: int = 1,
-    min_val_per_class: int = 1,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-    """
-    Houston OUC fixed split:
-      - train/test are loaded from index_mat
-      - val is sampled from TRAIN only (stratified by class), controlled by:
-            if fixed_val_per_class >= 0: fixed number per class
-            else: use val_ratio in each class, with min_val_per_class
-      - keep at least min_train_keep_per_class in TRAIN per class after taking val (when feasible)
-    """
-    rng = np.random.default_rng(int(seed))
-    N = int(gt_flat.size)
-    raise RuntimeError("Internal error: _make_fixed_index_split must be called with H,W-aware wrapper.")
-
-
 def _make_stratified_split(
     gt_flat: np.ndarray,
     classes: List[int],
@@ -315,16 +267,7 @@ def _make_stratified_split(
     per_class_train: int = -1,
     per_class_val: int = -1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-    """
-    Stratified RANDOM split on labeled pixels (gt>0), producing:
-      train_indices, val_indices, test_indices (flat indices into H*W)
-
-    Two modes:
-      (A) ratio mode: use train_ratio/val_ratio, then match global split counts
-      (B) per-class mode: use fixed per_class_train/per_class_val for each class
-
-    Per-class minima (min_*_per_class) are enforced as "keeps" when feasible; relaxed only for tiny classes.
-    """
+    """Build a stratified random split over the labeled pixels."""
     rng = np.random.default_rng(int(seed))
     N = int((gt_flat > 0).sum())
 
@@ -616,13 +559,10 @@ def _make_houston_fixed_from_index(
     min_train_keep_per_class: int = 1,
     min_val_per_class: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-    """
-    Wrapper with H,W for Houston fixed split.
-    """
+    """Build the Houston fixed split with validation sampled from train."""
     gt = np.asarray(gt_2d).astype(np.int64)
     H, W = gt.shape
     gt_flat = gt.reshape(-1)
-    N = int(gt_flat.size)
 
     idx_dict = _load_mat_any(index_mat_path)
     keys = list(idx_dict.keys())

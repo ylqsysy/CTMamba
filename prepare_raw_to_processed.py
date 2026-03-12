@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Prepare raw .mat -> processed .npy (cube.npy / gt.npy)
-
-Supports:
-- MATLAB < v7.3 via scipy.io.loadmat
-- MATLAB v7.3 (HDF5) via h5py
-
-Outputs:
-data/processed/<dataset>/raw/cube.npy  (H,W,B) float32
-data/processed/<dataset>/raw/gt.npy    (H,W)   int64
-"""
+"""Convert raw MATLAB files to processed NumPy arrays."""
 
 from __future__ import annotations
 

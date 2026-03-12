@@ -12,24 +12,36 @@ _NORM_PAD_CACHE: "OrderedDict[Tuple[Any, ...], np.ndarray]" = OrderedDict()
 _NORM_PAD_CACHE_MAX = 4
 
 
-def _norm_pad_cache_key(cube: np.ndarray, mean: np.ndarray, std: np.ndarray, half: int) -> Tuple[Any, ...]:
+def _norm_pad_cache_key(
+    cube: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    half: int,
+    pad_mode: str,
+) -> Tuple[Any, ...]:
     ptr = int(cube.__array_interface__["data"][0])
     shape = tuple(int(x) for x in cube.shape)
     strides = tuple(int(x) for x in cube.strides)
     mean_key = np.asarray(mean, dtype=np.float32).reshape(-1).tobytes()
     std_key = np.asarray(std, dtype=np.float32).reshape(-1).tobytes()
-    return (ptr, shape, strides, int(half), mean_key, std_key)
+    return (ptr, shape, strides, int(half), str(pad_mode), mean_key, std_key)
 
 
-def _get_or_build_norm_padded_cube(cube: np.ndarray, mean: np.ndarray, std: np.ndarray, half: int) -> np.ndarray:
-    key = _norm_pad_cache_key(cube, mean, std, half)
+def _get_or_build_norm_padded_cube(
+    cube: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    half: int,
+    pad_mode: str,
+) -> np.ndarray:
+    key = _norm_pad_cache_key(cube, mean, std, half, pad_mode)
     got = _NORM_PAD_CACHE.get(key)
     if got is not None:
         _NORM_PAD_CACHE.move_to_end(key)
         return got
 
     cube_norm = np.ascontiguousarray((cube - mean) / std, dtype=np.float32)
-    cube_pad = np.pad(cube_norm, ((half, half), (half, half), (0, 0)), mode="edge")
+    cube_pad = np.pad(cube_norm, ((half, half), (half, half), (0, 0)), mode=str(pad_mode))
     cube_pad = np.ascontiguousarray(cube_pad, dtype=np.float32)
     _NORM_PAD_CACHE[key] = cube_pad
     _NORM_PAD_CACHE.move_to_end(key)
@@ -39,14 +51,7 @@ def _get_or_build_norm_padded_cube(cube: np.ndarray, mean: np.ndarray, std: np.n
 
 
 def _ensure_hwb_cube(cube: np.ndarray, gt: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Ensure cube is (H, W, B) and gt is (H, W).
-
-    Supports common layouts:
-      - cube: (H, W, B)
-      - cube: (B, H, W)
-      - cube: (W, H, B)  (swapped spatial axes)
-    """
+    """Return the cube in `(H, W, B)` order and the label map in `(H, W)`."""
     cube = np.asarray(cube)
     gt = np.asarray(gt)
 
@@ -76,12 +81,7 @@ def _ensure_hwb_cube(cube: np.ndarray, gt: np.ndarray) -> Tuple[np.ndarray, np.n
 
 
 def _to_flat_indices(indices: np.ndarray, gt_shape: Tuple[int, int]) -> np.ndarray:
-    """
-    Accept:
-      - flat indices: (N,)
-      - coords: (N,2) as (row, col)
-    Return flat indices (N,)
-    """
+    """Convert flat indices or `(row, col)` pairs to flat indices."""
     indices = np.asarray(indices)
     _, W = gt_shape
 
@@ -109,6 +109,7 @@ class HSIPatchDataset(Dataset):
     return_x_spec: bool = True
 
     noise_std: float = 0.0
+    pad_mode: str = "edge"
 
     def __post_init__(self) -> None:
         ps = int(self.patch_size)
@@ -150,21 +151,26 @@ class HSIPatchDataset(Dataset):
 
         self.noise_std = float(self.noise_std)
         self.return_x_spec = bool(self.return_x_spec)
+        pad_mode = str(self.pad_mode or "edge").strip().lower()
+        if pad_mode in ("replicate", "nearest"):
+            pad_mode = "edge"
+        if pad_mode not in {"edge", "reflect", "symmetric"}:
+            raise ValueError(f"[HSIPatchDataset] unsupported pad_mode='{self.pad_mode}'")
+        self.pad_mode = pad_mode
 
-        self._cube_pad = _get_or_build_norm_padded_cube(self.cube, self.mean, self.std, self.half)
+        self._cube_pad = _get_or_build_norm_padded_cube(
+            self.cube,
+            self.mean,
+            self.std,
+            self.half,
+            self.pad_mode,
+        )
 
     def __len__(self) -> int:
         return int(self.indices.size)
 
     def _spatial_aug(self, patch: np.ndarray) -> np.ndarray:
-        """
-        random flip / rotation (HSI-safe: preserves spectrum, changes spatial)
-
-        IMPORTANT:
-        - flip/rot90 may create negative-stride views
-        - torch.from_numpy does NOT support negative strides
-        => always return contiguous array
-        """
+        """Apply random flips and right-angle rotations."""
         if np.random.rand() < 0.5:
             patch = patch[::-1, :, :]
         if np.random.rand() < 0.5:
@@ -214,7 +220,7 @@ class HSIPatchDataset(Dataset):
                 patch = np.pad(
                     patch,
                     ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
-                    mode="edge",
+                    mode=self.pad_mode,
                 )
 
             if patch.shape[0] != self.patch_size or patch.shape[1] != self.patch_size:
@@ -243,14 +249,10 @@ def compute_train_norm(
     train_indices: np.ndarray,
     *,
     mean_global_blend: float = 0.0,
+    std_global_ratio: float = 0.0,
     std_abs_floor: float = 1e-3,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Per-band mean/std from train pixels with optional absolute std floor.
-
-    - mean: (1-mean_global_blend)*train_mean + mean_global_blend*global_mean
-    - std : max(train_std, std_abs_floor)
-    """
+    """Compute per-band normalization statistics from the training split."""
     cube = np.asarray(cube)
     if cube.ndim != 3:
         raise ValueError(f"[compute_train_norm] cube must be 3D, got {cube.shape}")
@@ -285,7 +287,11 @@ def compute_train_norm(
     mean = ((1.0 - w) * train_mean + w * global_mean).astype(np.float32)
 
     train_std = train_vals.std(axis=0).astype(np.float32)
-    std = np.maximum(train_std, float(std_abs_floor)).astype(np.float32)
+    global_std = flat.std(axis=0).astype(np.float32)
+    r = float(std_global_ratio)
+    r = 0.0 if r < 0.0 else r
+    std = np.maximum(train_std, r * global_std).astype(np.float32)
+    std = np.maximum(std, float(std_abs_floor)).astype(np.float32)
 
     std = np.maximum(std, 1e-6).astype(np.float32)
     return mean, std

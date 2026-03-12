@@ -269,11 +269,13 @@ def main() -> None:
     split_json_sha1 = _sha1_file(split_json_path)
 
     norm_mean_global_blend = float(train_cfg.get("norm_mean_global_blend", 0.0))
+    norm_std_global_ratio = float(train_cfg.get("norm_std_global_ratio", 0.0))
     norm_std_abs_floor = float(train_cfg.get("norm_std_abs_floor", 1.0e-3))
     mean, std = compute_train_norm(
         cube,
         tr_indices,
         mean_global_blend=norm_mean_global_blend,
+        std_global_ratio=norm_std_global_ratio,
         std_abs_floor=norm_std_abs_floor,
     )
     np.savez(out_dir / "meta" / "norm_stats.npz", mean=mean, std=std)
@@ -287,6 +289,9 @@ def main() -> None:
     logit_adjust_tau = float(train_cfg.get("logit_adjust_tau", 0.0))
     class_weight_mode = str(train_cfg.get("class_weight_mode", "none")).strip().lower()
     class_weight_beta = float(train_cfg.get("class_weight_beta", 0.999))
+    class_weight_power = float(train_cfg.get("class_weight_power", 1.0))
+    spectral_dropout = float(train_cfg.get("spectral_dropout", 0.0))
+    pad_mode = str(train_cfg.get("pad_mode", "edge")).strip().lower()
 
     flat_gt = gt.reshape(-1).astype(np.int64)
     tr_labels = flat_gt[tr_indices] - int(label_offset)
@@ -297,7 +302,9 @@ def main() -> None:
     class_prior_np = counts / max(1.0, float(counts.sum()))
 
     class_weights_np: np.ndarray | None
-    if class_weight_mode in ("inv", "inverse"):
+    if class_weight_mode in ("balanced", "balance"):
+        class_weights_np = counts.sum() / (float(num_classes) * np.clip(counts, 1.0, None))
+    elif class_weight_mode in ("inv", "inverse"):
         class_weights_np = 1.0 / np.clip(counts, 1.0, None)
     elif class_weight_mode in ("sqrt_inv", "sqrt_inverse"):
         class_weights_np = 1.0 / np.sqrt(np.clip(counts, 1.0, None))
@@ -308,6 +315,9 @@ def main() -> None:
         class_weights_np = None
     if class_weights_np is not None:
         class_weights_np = class_weights_np / np.maximum(class_weights_np.mean(), 1.0e-12)
+        alpha = float(np.clip(class_weight_power, 0.0, 1.0))
+        class_weights_np = (1.0 - alpha) * np.ones_like(class_weights_np, dtype=np.float64) + alpha * class_weights_np
+        class_weights_np = class_weights_np / np.maximum(class_weights_np.mean(), 1.0e-12)
 
     ds_train_kwargs = dict(
         cube=cube, gt=gt, indices=tr_indices, patch_size=patch_size, mean=mean, std=std,
@@ -315,10 +325,12 @@ def main() -> None:
         augment=bool(train_cfg.get("augment", False)),
         return_x_spec=need_x_spec,
         noise_std=float(train_cfg.get("noise_std", 0.0)),
+        pad_mode=pad_mode,
     )
     ds_eval_kwargs = dict(
         cube=cube, gt=gt, patch_size=patch_size, mean=mean, std=std, label_offset=label_offset, augment=False,
         return_x_spec=need_x_spec,
+        pad_mode=pad_mode,
     )
 
     ds_tr = HSIPatchDataset(**_filter_kwargs(HSIPatchDataset.__init__, ds_train_kwargs))
@@ -436,7 +448,6 @@ def main() -> None:
     final_eval_prefetch_factor = int(train_cfg.get("final_eval_prefetch_factor", eval_prefetch_factor))
     final_eval_log_interval = max(0, int(train_cfg.get("final_eval_log_interval", 25)))
     final_eval_batch_size = max(1, int(train_cfg.get("final_eval_batch_size", 1024)))
-
     best_ep = -1
     best_score = -1.0e18
 
@@ -460,6 +471,7 @@ def main() -> None:
             logit_adjust_tau=logit_adjust_tau,
             class_prior=class_prior_t,
             class_weights=class_weights_t,
+            spectral_dropout=spectral_dropout,
         )
         loss_out = train_one_epoch(**_filter_kwargs(train_one_epoch, train_kwargs))
         loss = _unwrap_scalar(loss_out)
