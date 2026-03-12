@@ -600,6 +600,14 @@ def main() -> None:
             "num_params_trainable": int(num_params_trainable),
         },
     }
+    run_signature = {
+        "dataset_cfg_sha1": dataset_cfg_sha1,
+        "model_cfg_sha1": model_cfg_sha1,
+        "train_cfg_sha1": train_cfg_sha1,
+        "split_json_sha1": split_json_sha1,
+        "seed": int(args.seed),
+    }
+    _save_json(out_dir / "meta" / "run_signature.json", run_signature)
     _save_json(out_dir / "metrics.json", final_out)
 
     print(
