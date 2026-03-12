@@ -9,12 +9,11 @@ import torch
 import torch.nn.functional as F
 
 
-def _as_x_xspec_y(batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-    """Normalize a supported batch layout to `(x, x_spec, y)`."""
+def _as_x_y(batch: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Normalize a supported batch layout to `(x, y)`."""
     if isinstance(batch, dict):
         x = batch.get("x", None)
         y = batch.get("y", None)
-        x_spec = batch.get("x_spec", batch.get("spec", None))
         if x is None or y is None:
             vals = [v for v in batch.values() if torch.is_tensor(v)]
             if len(vals) < 2:
@@ -24,95 +23,43 @@ def _as_x_xspec_y(batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], tor
                 x, y = vals[0], vals[1]
             else:
                 x = next(v for v in vals if v is not y)
-        return x, x_spec, y
+        return x, y
 
     if isinstance(batch, (list, tuple)):
         if len(batch) < 2:
             raise ValueError("Batch tuple must have at least (x, y).")
         x = batch[0]
-        x_spec = None
         y = None
 
         if len(batch) >= 3:
             b1, b2 = batch[1], batch[2]
             if torch.is_tensor(b1) and b1.dtype in (torch.int64, torch.int32, torch.int16, torch.uint8):
                 y = b1
-                if torch.is_tensor(b2) and b2.dtype.is_floating_point:
-                    x_spec = b2
             elif torch.is_tensor(b2) and b2.dtype in (torch.int64, torch.int32, torch.int16, torch.uint8):
                 y = b2
-                if torch.is_tensor(b1) and b1.dtype.is_floating_point:
-                    x_spec = b1
 
         if y is None:
             y = batch[1]
 
-        return x, x_spec, y
+        return x, y
 
     raise ValueError(f"Unsupported batch type: {type(batch)}")
-
-
-def _find_patch_spatial_dims(x: torch.Tensor, patch_size: int = 15) -> Tuple[int, int]:
-    dims = [i for i in range(1, x.ndim) if x.shape[i] == patch_size]
-    if len(dims) >= 2:
-        return dims[-2], dims[-1]
-    return x.ndim - 2, x.ndim - 1
-
-
-def _derive_x_spec_from_x(x: torch.Tensor, patch_size: int = 15) -> Optional[torch.Tensor]:
-    if not torch.is_tensor(x):
-        return None
-    if x.ndim < 3:
-        return None
-
-    if x.ndim == 4:
-        if int(x.shape[2]) == patch_size and int(x.shape[3]) == patch_size:
-            return x[:, :, patch_size // 2, patch_size // 2]
-        if int(x.shape[1]) == patch_size and int(x.shape[2]) == patch_size:
-            return x[:, patch_size // 2, patch_size // 2, :]
-
-    hdim, wdim = _find_patch_spatial_dims(x, patch_size)
-    h = int(x.shape[hdim])
-    w = int(x.shape[wdim])
-    ch, cw = h // 2, w // 2
-
-    slc = [slice(None)] * x.ndim
-    slc[hdim] = ch
-    slc[wdim] = cw
-    xc = x[tuple(slc)]
-
-    if xc.ndim == 2:
-        return xc
-    if xc.ndim > 2:
-        if xc.ndim >= 3:
-            sizes = [(int(xc.shape[i]), i) for i in range(1, xc.ndim)]
-            sizes.sort(reverse=True)
-            bands_dim = sizes[0][1]
-            xc = xc.movedim(bands_dim, 1)
-            xc = xc.reshape(xc.shape[0], xc.shape[1], -1).mean(dim=-1)
-            return xc
-    return None
 
 
 def _mixup(
     x: torch.Tensor,
     y: torch.Tensor,
     alpha: float,
-    x_spec: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, float]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
     if alpha <= 0.0:
-        return x, x_spec, y, y, 1.0
+        return x, y, y, 1.0
     lam = np.random.beta(alpha, alpha)
     lam = float(max(0.0, min(1.0, lam)))
     idx = torch.randperm(x.size(0), device=x.device)
     x2 = x[idx]
     y2 = y[idx]
     x_mix = x * lam + x2 * (1.0 - lam)
-    x_spec_mix = None
-    if x_spec is not None:
-        x_spec2 = x_spec[idx]
-        x_spec_mix = x_spec * lam + x_spec2 * (1.0 - lam)
-    return x_mix, x_spec_mix, y, y2, lam
+    return x_mix, y, y2, lam
 
 
 def _ce_loss(
@@ -154,37 +101,19 @@ def _focal_loss(
 def _forward_logits(
     model: torch.nn.Module,
     x: torch.Tensor,
-    x_spec: Optional[torch.Tensor],
-    *,
-    patch_size: int = 15,
-    derive_x_spec: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    out = None
-    if x_spec is None:
-        try:
-            out = model(x)
-        except TypeError:
-            if not bool(derive_x_spec):
-                raise
-            x_spec2 = _derive_x_spec_from_x(x, patch_size=patch_size)
-            if x_spec2 is None:
-                raise
-            out = model(x, x_spec2)
-    else:
-        try:
-            out = model(x, x_spec)
-        except TypeError:
-            out = model(x)
+    out = model(x)
 
     if torch.is_tensor(out):
         return out, None
     if isinstance(out, (list, tuple)):
         logits = out[0]
+        aux = None
         for t in out[1:]:
             if torch.is_tensor(t) and t.ndim == 1:
-                unc = t
+                aux = t
                 break
-        return logits, unc
+        return logits, aux
     if isinstance(out, dict):
         for k in ("logits", "pred", "y", "scores"):
             if k in out and torch.is_tensor(out[k]):
@@ -211,16 +140,11 @@ def train_one_epoch(
     mixup_prob: float = 0.0,
     mixup_alpha: float = 0.0,
     aug_noise_std: float = 0.0,
-    patch_size: int = 15,
     grad_accum_steps: int = 1,
-    need_x_spec: bool = True,
     loss_type: str = "ce",
     label_smoothing: float = 0.0,
     focal_gamma: float = 2.0,
-    logit_adjust_tau: float = 0.0,
-    class_prior: Optional[torch.Tensor] = None,
     class_weights: Optional[torch.Tensor] = None,
-    spectral_dropout: float = 0.0,
 ) -> float:
     model.train()
     if scaler is None:
@@ -234,66 +158,36 @@ def train_one_epoch(
     loss_type = str(loss_type).strip().lower()
     label_smoothing = float(max(0.0, label_smoothing))
     focal_gamma = float(max(0.0, focal_gamma))
-    logit_adjust_tau = float(max(0.0, logit_adjust_tau))
-    spectral_dropout = float(max(0.0, spectral_dropout))
-
-    if class_prior is not None:
-        class_prior = class_prior.to(device=device, dtype=torch.float32)
     if class_weights is not None:
         class_weights = class_weights.to(device=device, dtype=torch.float32)
 
     for batch in dl:
-
-        x, x_spec, y = _as_x_xspec_y(batch)
+        x, y = _as_x_y(batch)
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True).long()
-        if not bool(need_x_spec):
-            x_spec = None
-        elif x_spec is not None and torch.is_tensor(x_spec):
-            x_spec = x_spec.to(device, non_blocking=True)
 
         if aug_noise_std and float(aug_noise_std) > 0.0:
             x = x + torch.randn_like(x) * float(aug_noise_std)
-            if x_spec is not None:
-                x_spec = x_spec + torch.randn_like(x_spec) * float(aug_noise_std)
-
-        if spectral_dropout > 0.0:
-            x = F.dropout2d(x, p=spectral_dropout, training=True)
-            if bool(need_x_spec):
-                x_spec = None
-
-        if bool(need_x_spec) and x_spec is None:
-            x_spec = _derive_x_spec_from_x(x, patch_size=patch_size)
 
         do_mix = (mixup_prob > 0.0) and (mixup_alpha > 0.0) and (torch.rand((), device=device).item() < mixup_prob)
         if do_mix:
-            x, x_spec, y_a, y_b, lam = _mixup(x, y, float(mixup_alpha), x_spec=x_spec)
+            x, y_a, y_b, lam = _mixup(x, y, float(mixup_alpha))
         else:
             y_a, y_b, lam = y, y, 1.0
 
         with torch.autocast(device_type="cuda", enabled=use_amp):
-            logits, _ = _forward_logits(
-                model,
-                x,
-                x_spec,
-                patch_size=patch_size,
-                derive_x_spec=bool(need_x_spec),
-            )
-
-            logits_loss = logits
-            if class_prior is not None and logit_adjust_tau > 0.0:
-                logits_loss = logits_loss + logit_adjust_tau * torch.log(class_prior.clamp_min(1.0e-12))[None, :]
+            logits, _ = _forward_logits(model, x)
 
             if loss_type == "focal":
                 loss_a = _focal_loss(
-                    logits_loss,
+                    logits,
                     y_a,
                     gamma=focal_gamma,
                     class_weights=class_weights,
                 )
             else:
                 loss_a = _ce_loss(
-                    logits_loss,
+                    logits,
                     y_a,
                     class_weights=class_weights,
                     label_smoothing=label_smoothing,
@@ -301,14 +195,14 @@ def train_one_epoch(
             if lam < 1.0:
                 if loss_type == "focal":
                     loss_b = _focal_loss(
-                        logits_loss,
+                        logits,
                         y_b,
                         gamma=focal_gamma,
                         class_weights=class_weights,
                     )
                 else:
                     loss_b = _ce_loss(
-                        logits_loss,
+                        logits,
                         y_b,
                         class_weights=class_weights,
                         label_smoothing=label_smoothing,
@@ -401,7 +295,6 @@ def _evaluate_hsi_dataset_fast(
     steps: int = 0,
     log_prefix: str = "",
     log_interval: int = 0,
-    need_x_spec: bool = True,
 ) -> Dict[str, Any]:
     ds = getattr(dl, "dataset")
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
@@ -412,11 +305,7 @@ def _evaluate_hsi_dataset_fast(
 
     gt = np.asarray(ds.gt, dtype=np.int64)
     cube_pad = np.asarray(ds._cube_pad, dtype=np.float32)
-    coord_pad = getattr(ds, "_coord_pad", None)
-    if coord_pad is not None:
-        coord_pad = np.asarray(coord_pad, dtype=np.float32)
     w = int(ds.w)
-    half = int(ds.half)
     ps = int(ds.patch_size) if int(ds.patch_size) > 0 else int(patch_size)
     label_offset = int(ds.label_offset)
 
@@ -447,25 +336,15 @@ def _evaluate_hsi_dataset_fast(
             rr = r[:, None] + offsets[None, :]
             cc = c[:, None] + offsets[None, :]
             patches = cube_pad[rr[:, :, None], cc[:, None, :], :]
-            if coord_pad is not None:
-                coord_patches = coord_pad[rr[:, :, None], cc[:, None, :], :]
-                patches = np.concatenate([patches, coord_patches], axis=-1)
             x_np = np.ascontiguousarray(np.transpose(patches, (0, 3, 1, 2)), dtype=np.float32)
 
             x_cpu = torch.from_numpy(x_np)
             if device.type == "cuda":
                 x_cpu = x_cpu.pin_memory()
             x = x_cpu.to(device, non_blocking=True)
-            x_spec = x[:, :, half, half].contiguous() if bool(need_x_spec) else None
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                logits, _ = _forward_logits(
-                    model,
-                    x,
-                    x_spec,
-                    patch_size=ps,
-                    derive_x_spec=bool(need_x_spec),
-                )
+                logits, _ = _forward_logits(model, x)
 
             pred = torch.argmax(logits, dim=1).detach().cpu().numpy().astype(np.int64, copy=False)
             pred_all[start:end] = pred
@@ -492,7 +371,6 @@ def evaluate(
     steps: int = 0,
     log_prefix: str = "",
     log_interval: int = 0,
-    need_x_spec: bool = True,
 ) -> Dict[str, Any]:
     model.eval()
     if _can_use_fast_dataset_eval(dl):
@@ -507,7 +385,6 @@ def evaluate(
                 steps=steps,
                 log_prefix=log_prefix,
                 log_interval=log_interval,
-                need_x_spec=need_x_spec,
             )
         except Exception as e:
             tag = f"[{str(log_prefix).strip()}] " if str(log_prefix).strip() else ""
@@ -529,22 +406,12 @@ def evaluate(
         for it, batch in enumerate(dl):
             if it_max is not None and it >= it_max:
                 break
-            x, x_spec, y = _as_x_xspec_y(batch)
+            x, y = _as_x_y(batch)
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
-            if not bool(need_x_spec):
-                x_spec = None
-            elif x_spec is not None and torch.is_tensor(x_spec):
-                x_spec = x_spec.to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                logits, _ = _forward_logits(
-                    model,
-                    x,
-                    x_spec,
-                    patch_size=patch_size,
-                    derive_x_spec=bool(need_x_spec),
-                )
+                logits, _ = _forward_logits(model, x)
 
             pred = torch.argmax(logits, dim=1)
             _confusion_matrix_update(cm, y.detach().cpu().numpy(), pred.detach().cpu().numpy(), num_classes)

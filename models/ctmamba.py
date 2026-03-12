@@ -4,11 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from models.spatial_scan import Downsample, VSSBlock
 
@@ -134,8 +133,6 @@ class CTMambaConfig:
 
     pool: str = "mean"
     pool_sigma: float = 1.2
-    front_end_type: str = "conv1x1"
-    back_end_type: str = "mlp"
     back_end_hidden_ratio: float = 2.0
     back_end_dropout: float = 0.10
 
@@ -159,8 +156,6 @@ class CTMambaConfig:
     rsa_dropout: float = 0.0
     rsa_weight: float = 0.50
 
-    head: str = "ce"
-
 
 class CenterTargetMamba(nn.Module):
     def __init__(self, cfg: CTMambaConfig):
@@ -180,9 +175,6 @@ class CenterTargetMamba(nn.Module):
         if float(cfg.block_mlp_ratio) <= 0.0:
             raise ValueError("block_mlp_ratio must be > 0")
 
-        front_end_type = str(getattr(cfg, "front_end_type", "conv1x1")).strip().lower()
-        if front_end_type != "conv1x1":
-            raise ValueError(f"CenterTargetMamba only supports front_end_type='conv1x1', got '{front_end_type}'")
         self.in_proj = _Conv1x1Stem(self.raw_bands, s0)
 
         self.stage0 = nn.Sequential(
@@ -232,14 +224,6 @@ class CenterTargetMamba(nn.Module):
                 for _ in range(int(cfg.stages[2]))
             ]
         )
-
-        back_end_type = str(getattr(cfg, "back_end_type", "mlp")).strip().lower()
-        if back_end_type != "mlp":
-            raise ValueError(f"CenterTargetMamba only supports back_end_type='mlp', got '{back_end_type}'")
-
-        head = str(getattr(cfg, "head", "ce")).strip().lower()
-        if head not in ("ce", "softmax", "logits"):
-            raise ValueError(f"Unsupported head='{head}'")
 
         self.ln_head = nn.LayerNorm(s2)
         be_hidden = int(max(s2, round(s2 * float(cfg.back_end_hidden_ratio))))
@@ -358,11 +342,11 @@ class CenterTargetMamba(nn.Module):
 
         return self.back_mlp(pooled)
 
-    def forward_features(self, x: torch.Tensor, _x_spec: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         tok, h, w = self._forward_tokens(x)
         return self._project_feature(tok, h, w, x_raw=x)
 
-    def forward(self, x: torch.Tensor, x_spec: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         tok, h, w = self._forward_tokens(x)
         feat = self._project_feature(tok, h, w, x_raw=x)
         return self.head(feat)

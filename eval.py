@@ -167,7 +167,6 @@ def main() -> None:
         "mean": mean,
         "std": std,
         "augment": False,
-        "return_x_spec": False,
         "pad_mode": str(train_cfg.get("pad_mode", "edge")),
     }
 
@@ -214,7 +213,6 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=use_amp,
         patch_size=patch_size,
-        need_x_spec=False,
         log_prefix="eval_val",
         log_interval=log_interval,
     )
@@ -225,7 +223,6 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=use_amp,
         patch_size=patch_size,
-        need_x_spec=False,
         log_prefix="eval_test",
         log_interval=log_interval,
     )

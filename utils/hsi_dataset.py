@@ -106,7 +106,6 @@ class HSIPatchDataset(Dataset):
     std: np.ndarray
     label_offset: int = 1
     augment: bool = False
-    return_x_spec: bool = True
 
     noise_std: float = 0.0
     pad_mode: str = "edge"
@@ -150,7 +149,6 @@ class HSIPatchDataset(Dataset):
         self.std = np.maximum(self.std, 1e-6).astype(np.float32)
 
         self.noise_std = float(self.noise_std)
-        self.return_x_spec = bool(self.return_x_spec)
         pad_mode = str(self.pad_mode or "edge").strip().lower()
         if pad_mode in ("replicate", "nearest"):
             pad_mode = "edge"
@@ -238,9 +236,6 @@ class HSIPatchDataset(Dataset):
         x = torch.from_numpy(x_np)
 
         y_t = torch.tensor(int(y), dtype=torch.long)
-        if self.return_x_spec:
-            x_spec = x[:, self.half, self.half].contiguous()
-            return x, x_spec, y_t
         return x, y_t
 
 

@@ -168,14 +168,6 @@ def _build_model(
     model = CTMamba(cfg).to(device)
     return model
 
-
-def _resolve_need_x_spec(train_cfg: Dict[str, Any], model_cfg: Dict[str, Any]) -> bool:
-    _ = model_cfg
-    if bool(train_cfg.get("need_x_spec", False)):
-        print("[warn] train_cfg.need_x_spec=true is ignored: current model does not use x_spec.", flush=True)
-    return False
-
-
 def _resolve_num_classes(split: Dict[str, Any], dataset_cfg: Dict[str, Any], gt: np.ndarray, label_offset: int) -> int:
     fallback = int(gt.max()) - int(label_offset) + 1
     num_classes = int(split.get("num_classes", dataset_cfg.get("num_classes", fallback)))
@@ -281,16 +273,13 @@ def main() -> None:
     np.savez(out_dir / "meta" / "norm_stats.npz", mean=mean, std=std)
 
     patch_size = int(model_cfg.get("patch_size", 15))
-    need_x_spec = _resolve_need_x_spec(train_cfg, model_cfg)
 
     loss_type = str(train_cfg.get("loss_type", "ce")).strip().lower()
     label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
     focal_gamma = float(train_cfg.get("focal_gamma", 2.0))
-    logit_adjust_tau = float(train_cfg.get("logit_adjust_tau", 0.0))
     class_weight_mode = str(train_cfg.get("class_weight_mode", "none")).strip().lower()
     class_weight_beta = float(train_cfg.get("class_weight_beta", 0.999))
     class_weight_power = float(train_cfg.get("class_weight_power", 1.0))
-    spectral_dropout = float(train_cfg.get("spectral_dropout", 0.0))
     pad_mode = str(train_cfg.get("pad_mode", "edge")).strip().lower()
 
     flat_gt = gt.reshape(-1).astype(np.int64)
@@ -299,8 +288,6 @@ def main() -> None:
     counts = np.bincount(tr_labels[valid], minlength=num_classes).astype(np.float64)
     if float(counts.sum()) <= 0.0:
         counts = np.ones((num_classes,), dtype=np.float64)
-    class_prior_np = counts / max(1.0, float(counts.sum()))
-
     class_weights_np: np.ndarray | None
     if class_weight_mode in ("balanced", "balance"):
         class_weights_np = counts.sum() / (float(num_classes) * np.clip(counts, 1.0, None))
@@ -323,13 +310,11 @@ def main() -> None:
         cube=cube, gt=gt, indices=tr_indices, patch_size=patch_size, mean=mean, std=std,
         label_offset=label_offset,
         augment=bool(train_cfg.get("augment", False)),
-        return_x_spec=need_x_spec,
         noise_std=float(train_cfg.get("noise_std", 0.0)),
         pad_mode=pad_mode,
     )
     ds_eval_kwargs = dict(
         cube=cube, gt=gt, patch_size=patch_size, mean=mean, std=std, label_offset=label_offset, augment=False,
-        return_x_spec=need_x_spec,
         pad_mode=pad_mode,
     )
 
@@ -398,7 +383,6 @@ def main() -> None:
             print(f"[init] missing_keys(sample): {missing[:8]}")
         if unexpected:
             print(f"[init] unexpected_keys(sample): {unexpected[:8]}")
-    class_prior_t = torch.from_numpy(class_prior_np.astype(np.float32)).to(device)
     class_weights_t = (
         torch.from_numpy(class_weights_np.astype(np.float32)).to(device)
         if class_weights_np is not None
@@ -414,11 +398,11 @@ def main() -> None:
     )
     print(
         f"[run] workers={num_workers}/{eval_num_workers}(tr/ev) "
-        f"deterministic={deterministic} need_x_spec={need_x_spec}"
+        f"deterministic={deterministic}"
     )
     print(
         f"[run] loss_type={loss_type} label_smoothing={label_smoothing:.4f} "
-        f"focal_gamma={focal_gamma:.3f} logit_adjust_tau={logit_adjust_tau:.3f} "
+        f"focal_gamma={focal_gamma:.3f} "
         f"class_weight_mode={class_weight_mode}"
     )
 
@@ -463,15 +447,10 @@ def main() -> None:
             grad_accum_steps=grad_accum_steps,
             mixup_alpha=mixup_alpha, mixup_prob=mixup_prob,
             aug_noise_std=aug_noise_std,
-            patch_size=patch_size,
-            need_x_spec=need_x_spec,
             loss_type=loss_type,
             label_smoothing=label_smoothing,
             focal_gamma=focal_gamma,
-            logit_adjust_tau=logit_adjust_tau,
-            class_prior=class_prior_t,
             class_weights=class_weights_t,
-            spectral_dropout=spectral_dropout,
         )
         loss_out = train_one_epoch(**_filter_kwargs(train_one_epoch, train_kwargs))
         loss = _unwrap_scalar(loss_out)
@@ -490,7 +469,6 @@ def main() -> None:
                 num_classes=num_classes,
                 use_amp=use_amp,
                 patch_size=patch_size,
-                need_x_spec=need_x_spec,
             )
             val_out = evaluate(**_filter_kwargs(evaluate, eval_kwargs))
 
@@ -505,9 +483,15 @@ def main() -> None:
             else:
                 score = kp
 
-            improved = (best_ep < 0) or (float(score) > float(best_score))
+            score_f = float(score)
+            best_score_f = float(best_score)
+            improved = (
+                (best_ep < 0)
+                or (score_f > best_score_f + 1.0e-12)
+                or (abs(score_f - best_score_f) <= 1.0e-12 and ep > best_ep)
+            )
             if improved:
-                best_score = float(score)
+                best_score = score_f
                 best_ep = ep
                 ckpt = {
                     "model": model.state_dict(),
@@ -562,7 +546,6 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=final_eval_amp,
         patch_size=patch_size,
-        need_x_spec=need_x_spec,
         log_prefix="final_val",
         log_interval=final_eval_log_interval,
     )
@@ -573,7 +556,6 @@ def main() -> None:
         num_classes=num_classes,
         use_amp=final_eval_amp,
         patch_size=patch_size,
-        need_x_spec=need_x_spec,
         log_prefix="final_test",
         log_interval=final_eval_log_interval,
     )
