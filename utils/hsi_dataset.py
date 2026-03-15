@@ -109,6 +109,8 @@ class HSIPatchDataset(Dataset):
 
     noise_std: float = 0.0
     pad_mode: str = "edge"
+    spec_dropout_p: float = 0.0
+    return_x_spec: bool = True
 
     def __post_init__(self) -> None:
         ps = int(self.patch_size)
@@ -149,6 +151,8 @@ class HSIPatchDataset(Dataset):
         self.std = np.maximum(self.std, 1e-6).astype(np.float32)
 
         self.noise_std = float(self.noise_std)
+        self.spec_dropout_p = float(np.clip(self.spec_dropout_p, 0.0, 1.0))
+        self.return_x_spec = bool(self.return_x_spec)
         pad_mode = str(self.pad_mode or "edge").strip().lower()
         if pad_mode in ("replicate", "nearest"):
             pad_mode = "edge"
@@ -230,12 +234,22 @@ class HSIPatchDataset(Dataset):
             patch = self._spatial_aug(patch)
             patch = self._spectral_aug(patch)
 
+        if self.spec_dropout_p > 0.0:
+            keep = np.random.rand(self.b) >= self.spec_dropout_p
+            if not np.any(keep):
+                keep[int(np.random.randint(0, self.b))] = True
+            patch = patch * keep.reshape(1, 1, -1).astype(np.float32, copy=False)
+
         patch = np.ascontiguousarray(patch, dtype=np.float32)
 
         x_np = np.ascontiguousarray(patch.transpose(2, 0, 1), dtype=np.float32)
         x = torch.from_numpy(x_np)
+        x_spec_np = np.ascontiguousarray(patch[self.half, self.half, :], dtype=np.float32)
+        x_spec = torch.from_numpy(x_spec_np)
 
         y_t = torch.tensor(int(y), dtype=torch.long)
+        if self.return_x_spec:
+            return x, x_spec, y_t
         return x, y_t
 
 

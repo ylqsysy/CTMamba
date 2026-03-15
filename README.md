@@ -21,7 +21,7 @@ python make_splits.py --help
 python run_multiseed.py \
   --dataset pavia_university \
   --split_tag random \
-  --seeds 0-2 \
+  --seeds 0-9 \
   --data_root data \
   --out_base outputs/checkpoints \
   --amp
