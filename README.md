@@ -1,6 +1,6 @@
-# CenterTargetMamba
+# CenterTargetedMamba
 
-PyTorch implementation of CenterTargetMamba for hyperspectral image classification.
+PyTorch implementation of CenterTargetedMamba for hyperspectral image classification.
 
 ## Requirements
 
