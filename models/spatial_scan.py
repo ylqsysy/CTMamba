@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+_VALID_SCAN_ROUTES = {"raster", "serpentine", "zigzag", "spiral"}
+
+
 def _best_group_divisor(channels: int, groups: int) -> int:
     g = int(max(1, groups))
     c = int(channels)
@@ -37,6 +40,85 @@ def _diag_selective_state_update(x: torch.Tensor, a: torch.Tensor, b: torch.Tens
     v = (b * x) * torch.exp(-prefix)
     h = torch.exp(prefix) * torch.cumsum(v, dim=-1)
     return h.to(dtype=in_dtype)
+
+
+def _route_coords(h: int, w: int, mode: str) -> list[tuple[int, int]]:
+    h_i = int(h)
+    w_i = int(w)
+    mode_s = str(mode).strip().lower()
+    if mode_s not in _VALID_SCAN_ROUTES:
+        raise ValueError(f"unsupported scan_route='{mode_s}', expected one of {sorted(_VALID_SCAN_ROUTES)}")
+
+    if mode_s == "raster":
+        return [(r, c) for r in range(h_i) for c in range(w_i)]
+
+    if mode_s == "serpentine":
+        out: list[tuple[int, int]] = []
+        for r in range(h_i):
+            cols = range(w_i) if (r % 2 == 0) else range(w_i - 1, -1, -1)
+            out.extend((r, c) for c in cols)
+        return out
+
+    if mode_s == "zigzag":
+        out = []
+        for s in range(h_i + w_i - 1):
+            band: list[tuple[int, int]] = []
+            r0 = max(0, s - (w_i - 1))
+            r1 = min(h_i - 1, s)
+            for r in range(r0, r1 + 1):
+                c = s - r
+                band.append((r, c))
+            if s % 2 == 0:
+                band.reverse()
+            out.extend(band)
+        return out
+
+    # "spiral": walk outward from the center and keep valid coordinates.
+    out = []
+    seen: set[tuple[int, int]] = set()
+    r = (h_i - 1) // 2
+    c = (w_i - 1) // 2
+
+    def _push(rr: int, cc: int) -> None:
+        if 0 <= rr < h_i and 0 <= cc < w_i and (rr, cc) not in seen:
+            seen.add((rr, cc))
+            out.append((rr, cc))
+
+    _push(r, c)
+    step = 1
+    while len(out) < h_i * w_i:
+        for _ in range(step):
+            c += 1
+            _push(r, c)
+        for _ in range(step):
+            r += 1
+            _push(r, c)
+        step += 1
+        for _ in range(step):
+            c -= 1
+            _push(r, c)
+        for _ in range(step):
+            r -= 1
+            _push(r, c)
+        step += 1
+    return out[: h_i * w_i]
+
+
+def _route_indices(
+    h: int,
+    w: int,
+    mode: str,
+    *,
+    vertical: bool,
+    device: torch.device,
+) -> torch.Tensor:
+    if not vertical:
+        coords = _route_coords(h, w, mode)
+        idx = [r * int(w) + c for r, c in coords]
+    else:
+        coords_t = _route_coords(w, h, mode)
+        idx = [c_t * int(w) + r_t for r_t, c_t in coords_t]
+    return torch.as_tensor(idx, dtype=torch.long, device=device)
 
 
 class SelectiveScan1D(nn.Module):
@@ -109,7 +191,7 @@ class SelectiveScan1D(nn.Module):
 
 
 class SpatialSelectiveScan2D(nn.Module):
-    """Baseline 2D selective scan (fixed raster route)."""
+    """2D selective scan with configurable flattening routes."""
 
     def __init__(
         self,
@@ -124,9 +206,9 @@ class SpatialSelectiveScan2D(nn.Module):
         super().__init__()
         self.dim = int(dim)
         self.route_mode = str(route_mode).strip().lower()
-        if self.route_mode != "raster":
+        if self.route_mode not in _VALID_SCAN_ROUTES:
             raise ValueError(
-                f"CenterTargetMamba only supports scan_route='raster', got '{self.route_mode}'"
+                f"unsupported scan_route='{self.route_mode}', expected one of {sorted(_VALID_SCAN_ROUTES)}"
             )
         self.scan = SelectiveScan1D(
             self.dim,
@@ -139,12 +221,33 @@ class SpatialSelectiveScan2D(nn.Module):
         )
         self.fuse = nn.Conv2d(self.dim * 4, self.dim, kernel_size=1, bias=True)
         self.out_drop = nn.Dropout2d(float(dropout))
+        self._route_cache: dict[tuple[int, int, str, bool, str], tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _get_route_and_inverse(
+        self,
+        h: int,
+        w: int,
+        *,
+        vertical: bool,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        device_key = str(device)
+        key = (int(h), int(w), str(self.route_mode), bool(vertical), device_key)
+        if key in self._route_cache:
+            return self._route_cache[key]
+        order = _route_indices(h, w, self.route_mode, vertical=vertical, device=device)
+        inv = torch.empty_like(order)
+        inv[order] = torch.arange(order.numel(), device=device, dtype=order.dtype)
+        self._route_cache[key] = (order, inv)
+        return order, inv
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
-        xt = x.transpose(2, 3).contiguous()
-        seq_h = x.reshape(b, c, h * w)
-        seq_v = xt.reshape(b, c, h * w)
+        flat = x.reshape(b, c, h * w)
+        order_h, inv_h = self._get_route_and_inverse(h, w, vertical=False, device=x.device)
+        order_v, inv_v = self._get_route_and_inverse(h, w, vertical=True, device=x.device)
+        seq_h = flat.index_select(-1, order_h)
+        seq_v = flat.index_select(-1, order_v)
 
         seq_all = torch.cat(
             [
@@ -158,10 +261,10 @@ class SpatialSelectiveScan2D(nn.Module):
         y_all = self.scan(seq_all)
         y_h_fwd, y_h_rev, y_v_fwd, y_v_rev = y_all.chunk(4, dim=0)
 
-        h_fwd = y_h_fwd.reshape(b, c, h, w)
-        h_rev = torch.flip(y_h_rev, dims=[-1]).reshape(b, c, h, w)
-        v_fwd = y_v_fwd.reshape(b, c, w, h).transpose(2, 3).contiguous()
-        v_rev = torch.flip(y_v_rev, dims=[-1]).reshape(b, c, w, h).transpose(2, 3).contiguous()
+        h_fwd = y_h_fwd.index_select(-1, inv_h).reshape(b, c, h, w)
+        h_rev = torch.flip(y_h_rev, dims=[-1]).index_select(-1, inv_h).reshape(b, c, h, w)
+        v_fwd = y_v_fwd.index_select(-1, inv_v).reshape(b, c, h, w)
+        v_rev = torch.flip(y_v_rev, dims=[-1]).index_select(-1, inv_v).reshape(b, c, h, w)
 
         y = torch.cat([h_fwd, h_rev, v_fwd, v_rev], dim=1)
         y = self.fuse(y)

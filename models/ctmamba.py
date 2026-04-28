@@ -39,12 +39,14 @@ class _BoundaryContrastAdapter(nn.Module):
         dropout: float = 0.0,
         core_radius: float = 0.35,
         boundary_radius: float = 0.70,
+        mode: str = "default",
     ):
         super().__init__()
         d = int(dim)
         hidden = int(max(32, round(d * float(hidden_ratio))))
         self.core_radius = float(max(0.0, min(1.0, core_radius)))
         self.boundary_radius = float(max(0.0, min(1.0, boundary_radius)))
+        self.mode = str(mode).strip().lower()
         if self.core_radius >= self.boundary_radius:
             self.boundary_radius = min(1.0, self.core_radius + 0.15)
 
@@ -70,18 +72,23 @@ class _BoundaryContrastAdapter(nn.Module):
     ) -> torch.Tensor:
         dist = _normalized_radius(h, w, device=tok.device, dtype=torch.float32)
         core_mask = (dist <= self.core_radius).to(dtype=torch.float32)
-        boundary_mask = (dist >= self.boundary_radius).to(dtype=torch.float32)
 
         if float(core_mask.sum().item()) < 1.0:
             core = center
         else:
             core = self._masked_mean(tok, core_mask)
-        if float(boundary_mask.sum().item()) < 1.0:
-            boundary = tok.mean(dim=1)
-        else:
-            boundary = self._masked_mean(tok, boundary_mask)
 
-        inter = core * boundary
+        if self.mode == "global_context":
+            boundary = tok.mean(dim=1)
+            inter = core - boundary
+        else:
+            boundary_mask = (dist >= self.boundary_radius).to(dtype=torch.float32)
+            if float(boundary_mask.sum().item()) < 1.0:
+                boundary = tok.mean(dim=1)
+            else:
+                boundary = self._masked_mean(tok, boundary_mask)
+            inter = core * boundary
+
         out_in = torch.cat([pooled, center, core, boundary, inter], dim=1)
         return self.mlp(out_in)
 
@@ -93,11 +100,13 @@ class _RawSpectralAdapter(nn.Module):
         out_dim: int,
         hidden_ratio: float = 2.0,
         dropout: float = 0.0,
+        mode: str = "default",
     ):
         super().__init__()
         in_dim = int(max(1, in_bands)) * 3
         out_dim = int(max(1, out_dim))
         hidden = int(max(out_dim, round(out_dim * float(hidden_ratio))))
+        self.mode = str(mode).strip().lower()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.GELU(),
@@ -110,8 +119,11 @@ class _RawSpectralAdapter(nn.Module):
         cy, cx = h // 2, w // 2
         center = x[:, :, cy, cx]
         mean = x.mean(dim=(2, 3))
-        std = x.flatten(2).std(dim=2, unbiased=False)
-        inp = torch.cat([center, mean, std], dim=1)
+        if self.mode == "center_delta":
+            third = center - mean
+        else:
+            third = x.flatten(2).std(dim=2, unbiased=False)
+        inp = torch.cat([center, mean, third], dim=1)
         return self.mlp(inp)
 
 
@@ -122,6 +134,7 @@ class CTMambaConfig:
 
     patch_size: int = 15
     dropout: float = 0.10
+    scan_route: str = "raster"
 
     stages: Tuple[int, int, int] = (2, 2, 5)
     stage_dims: Tuple[int, int, int] = (96, 128, 160)
@@ -139,22 +152,26 @@ class CTMambaConfig:
     cca_hidden_ratio: float = 1.0
     cca_dropout: float = 0.0
     cca_weight: float = 0.50
+    cca_mode: str = "default"
 
     cpa_hidden_ratio: float = 1.0
     cpa_dropout: float = 0.0
     cpa_weight: float = 0.50
     cpa_inner_radius: int = 1
     cpa_outer_radius: int = 2
+    cpa_mode: str = "default"
 
     bca_hidden_ratio: float = 1.0
     bca_dropout: float = 0.0
     bca_weight: float = 0.50
     bca_core_radius: float = 0.35
     bca_boundary_radius: float = 0.70
+    bca_mode: str = "default"
 
     rsa_hidden_ratio: float = 2.0
     rsa_dropout: float = 0.0
     rsa_weight: float = 0.50
+    rsa_mode: str = "default"
 
 
 class CenterTargetMamba(nn.Module):
@@ -186,7 +203,7 @@ class CenterTargetMamba(nn.Module):
                     mamba_ratio=float(cfg.mamba_ratio),
                     mamba_decay_min=float(cfg.mamba_decay_min),
                     mamba_decay_max=float(cfg.mamba_decay_max),
-                    scan_route="raster",
+                    scan_route=str(cfg.scan_route),
                     mlp_ratio=float(cfg.block_mlp_ratio),
                 )
                 for _ in range(int(cfg.stages[0]))
@@ -202,7 +219,7 @@ class CenterTargetMamba(nn.Module):
                     mamba_ratio=float(cfg.mamba_ratio),
                     mamba_decay_min=float(cfg.mamba_decay_min),
                     mamba_decay_max=float(cfg.mamba_decay_max),
-                    scan_route="raster",
+                    scan_route=str(cfg.scan_route),
                     mlp_ratio=float(cfg.block_mlp_ratio),
                 )
                 for _ in range(int(cfg.stages[1]))
@@ -218,7 +235,7 @@ class CenterTargetMamba(nn.Module):
                     mamba_ratio=float(cfg.mamba_ratio),
                     mamba_decay_min=float(cfg.mamba_decay_min),
                     mamba_decay_max=float(cfg.mamba_decay_max),
-                    scan_route="raster",
+                    scan_route=str(cfg.scan_route),
                     mlp_ratio=float(cfg.block_mlp_ratio),
                 )
                 for _ in range(int(cfg.stages[2]))
@@ -232,6 +249,19 @@ class CenterTargetMamba(nn.Module):
             nn.GELU(),
             nn.Dropout(float(cfg.back_end_dropout)),
         )
+
+        self.cca_mode = str(cfg.cca_mode).strip().lower()
+        self.cpa_mode = str(cfg.cpa_mode).strip().lower()
+        self.bca_mode = str(cfg.bca_mode).strip().lower()
+        self.rsa_mode = str(cfg.rsa_mode).strip().lower()
+        if self.cca_mode not in {"default", "product_gate"}:
+            raise ValueError(f"unsupported cca_mode: {cfg.cca_mode}")
+        if self.cpa_mode not in {"default", "single_scale"}:
+            raise ValueError(f"unsupported cpa_mode: {cfg.cpa_mode}")
+        if self.bca_mode not in {"default", "global_context"}:
+            raise ValueError(f"unsupported bca_mode: {cfg.bca_mode}")
+        if self.rsa_mode not in {"default", "center_delta"}:
+            raise ValueError(f"unsupported rsa_mode: {cfg.rsa_mode}")
 
         cca_hidden = int(max(32, round(s2 * float(cfg.cca_hidden_ratio))))
         self.cca_weight = float(cfg.cca_weight)
@@ -260,6 +290,7 @@ class CenterTargetMamba(nn.Module):
             dropout=float(cfg.bca_dropout),
             core_radius=float(cfg.bca_core_radius),
             boundary_radius=float(cfg.bca_boundary_radius),
+            mode=self.bca_mode,
         )
 
         self.rsa_weight = float(cfg.rsa_weight)
@@ -268,6 +299,7 @@ class CenterTargetMamba(nn.Module):
             out_dim=s2,
             hidden_ratio=float(cfg.rsa_hidden_ratio),
             dropout=float(cfg.rsa_dropout),
+            mode=self.rsa_mode,
         )
 
         self.head = nn.Linear(be_hidden, self.num_classes)
@@ -318,7 +350,11 @@ class CenterTargetMamba(nn.Module):
         center = tok[:, cy * w + cx, :]
         context = tok.mean(dim=1)
 
-        cca_in = torch.cat([pooled, center, center - context], dim=1)
+        if self.cca_mode == "product_gate":
+            cca_aux = pooled * center
+        else:
+            cca_aux = center - context
+        cca_in = torch.cat([pooled, center, cca_aux], dim=1)
         pooled = pooled + self.cca_weight * self.center_context_mlp(cca_in)
 
         yy = torch.arange(h, device=tok.device)
@@ -327,14 +363,19 @@ class CenterTargetMamba(nn.Module):
         cheb = torch.maximum((gy - cy).abs(), (gx - cx).abs())
         flat_idx = (gy * w + gx).reshape(-1)
 
-        inner_mask = ((cheb >= 1) & (cheb <= self.cpa_inner_radius)).reshape(-1)
-        outer_mask = ((cheb > self.cpa_inner_radius) & (cheb <= self.cpa_outer_radius)).reshape(-1)
-        inner_idx = flat_idx[inner_mask]
-        outer_idx = flat_idx[outer_mask]
-
-        inner = tok.index_select(1, inner_idx).mean(dim=1) if inner_idx.numel() > 0 else center
-        outer = tok.index_select(1, outer_idx).mean(dim=1) if outer_idx.numel() > 0 else inner
-        cpa_in = torch.cat([pooled, center, inner, outer, center - outer], dim=1)
+        if self.cpa_mode == "single_scale":
+            local_mask = ((cheb >= 1) & (cheb <= self.cpa_outer_radius)).reshape(-1)
+            local_idx = flat_idx[local_mask]
+            local = tok.index_select(1, local_idx).mean(dim=1) if local_idx.numel() > 0 else center
+            cpa_in = torch.cat([pooled, center, local, center - local, pooled - local], dim=1)
+        else:
+            inner_mask = ((cheb >= 1) & (cheb <= self.cpa_inner_radius)).reshape(-1)
+            outer_mask = ((cheb > self.cpa_inner_radius) & (cheb <= self.cpa_outer_radius)).reshape(-1)
+            inner_idx = flat_idx[inner_mask]
+            outer_idx = flat_idx[outer_mask]
+            inner = tok.index_select(1, inner_idx).mean(dim=1) if inner_idx.numel() > 0 else center
+            outer = tok.index_select(1, outer_idx).mean(dim=1) if outer_idx.numel() > 0 else inner
+            cpa_in = torch.cat([pooled, center, inner, outer, center - outer], dim=1)
         pooled = pooled + self.cpa_weight * self.center_pyramid_mlp(cpa_in)
 
         pooled = pooled + self.bca_weight * self.boundary_contrast_adapter(tok, h, w, pooled, center)
